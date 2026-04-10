@@ -2,6 +2,7 @@
 using HarmonyLib;
 using Observers.src;
 using System.Collections;
+using System.Collections.Generic;
 using System.Diagnostics;
 using Unity.Netcode;
 using UnityEngine;
@@ -30,6 +31,21 @@ namespace Observers {
         bool isStartingCooldown = false;
         private GameObject activeSiren;
         private float attackCooldown = 0f;
+        private Ray enemyRay;
+        private RaycastHit enemyRayHit;
+        private int currentFootstepSurfaceIndex;
+        private int previousFootstepClip;
+        public AudioSource movementAudio;
+        public GameObject knifeModel;
+        public Item knifeItemPrefab;
+        public AudioClip[] knifeStabSounds;
+        private DoorLock[] cachedDoors;
+        private float slowScanTimer = 0f;
+        private const float SLOW_SCAN_INTERVAL = 2.0f;
+        private Dictionary<DoorLock, float> doorCooldowns = new Dictionary<DoorLock, float>();
+        public AudioClip chaserDeathSound;
+        public AudioClip chaserReanimateSound;
+
 
         enum State {
             Observing,
@@ -57,6 +73,11 @@ namespace Observers {
             {
                 chaserAnim.cullingMode = AnimatorCullingMode.AlwaysAnimate;
                 chaserAnim.enabled = true;
+            }
+
+            if (creatureSFX != null)
+            {
+                creatureSFX.spatialize = false;
             }
 
             base.GetAINodes();
@@ -87,6 +108,19 @@ namespace Observers {
             {
                 chaserAnim.SetTrigger(animationTrigger);
                 Plugin.Logger.LogInfo($"Triggered animation: {animationTrigger}");
+            }
+        }
+
+        [ClientRpc]
+        public void PlayChaserSFXClientRpc(string sfxType)
+        {
+            if (sfxType == "reanimate")
+            {
+                creatureSFX.Play();
+            }
+            else if (sfxType == "death" && dieSFX != null)
+            {
+                creatureVoice.PlayOneShot(dieSFX);
             }
         }
 
@@ -138,7 +172,7 @@ namespace Observers {
                 }
             }
 
-            spawnPos.y += 8f;
+            spawnPos.y += 15f;
 
             Vector3 lookDirection = doorPos - spawnPos;
             lookDirection.y = 0;
@@ -184,12 +218,44 @@ namespace Observers {
             {
                 attackCooldown -= Time.deltaTime;
             }
+
+            if (!isEnemyDead)
+            {
+                slowScanTimer += Time.deltaTime;
+                if (slowScanTimer >= SLOW_SCAN_INTERVAL)
+                {
+                    slowScanTimer = 0f;
+                    cachedDoors = FindObjectsOfType<DoorLock>();
+                }
+            }
+
+            if (!isEnemyDead && currentBehaviourStateIndex == (int)State.Chase)
+            {
+                chaseTimer += Time.deltaTime;
+                if (chaseTimer > 40f)
+                {
+                    chaseTimer = 0f;
+                    agent.speed = 0f;
+
+                    DoAnimationClientRpc("hasBeenKilled");
+                    SetChasePhysicsClientRpc(false);
+
+                    ToggleVisualKnifeClientRpc(false);
+                    if (IsServer) SpawnKnifeItemLocally();
+
+                    if (dieSFX != null) creatureVoice.PlayOneShot(dieSFX);
+
+                    SwitchToBehaviourClientRpc((int)State.Cooldown);
+                }
+            }
+
             var state = currentBehaviourStateIndex;
         }
 
         public void LateUpdate()
         {
-            if (activeObserver != null && !isEnemyDead && currentBehaviourStateIndex == (int)State.Observing)
+            if (activeObserver != null && !isEnemyDead &&
+                (currentBehaviourStateIndex == (int)State.Observing || currentBehaviourStateIndex == (int)State.MarkingPlayer))
             {
                 PlayerControllerB playerToWatch = targetPlayer;
                 if (playerToWatch == null) playerToWatch = GetClosestPlayer(requireLineOfSight: false);
@@ -200,6 +266,9 @@ namespace Observers {
                     if (obsAnim != null) obsAnim.applyRootMotion = false;
 
                     Vector3 lookDir = playerToWatch.gameplayCamera.transform.position - activeObserver.transform.position;
+
+                    lookDir.y = 0;
+
                     if (lookDir != Vector3.zero)
                     {
                         Quaternion targetRot = Quaternion.LookRotation(lookDir);
@@ -275,7 +344,6 @@ namespace Observers {
             {
                 if (!isPlayingMarkAnimation)
                 {
-                    Plugin.Logger.LogInfo("SIREN SOUNDING!!!");
                     isPlayingMarkAnimation = true;
                     StartCoroutine(MarkAndChaseSequence());
                 }
@@ -309,52 +377,222 @@ namespace Observers {
 
             SpectreAnimationClientRpc("isMarked");
 
-            yield return new WaitForSeconds(10f);
+            yield return new WaitForSeconds(15f);
 
             DespawnObserverSpectre();
             DoAnimationClientRpc("hasBeenSummoned");
-
+            ToggleVisualKnifeClientRpc(true);
+            PlayChaserSFXClientRpc("reanimate");
+            StartCoroutine(FlickerLightsDuringRise(13.5f));
             yield return new WaitForSeconds(13.5f);
-
+            DoAnimationClientRpc("riseFinished");
+            if (!creatureVoice.isPlaying)
+            {
+                creatureVoice.Play();
+            }
             SwitchToBehaviourClientRpc((int)State.Chase);
             isPlayingMarkAnimation = false;
+        }
+
+        public void GetMaterialStandingOn()
+        {
+            enemyRay = new Ray(base.transform.position + Vector3.up, -Vector3.up);
+            if (Physics.Raycast(enemyRay, out enemyRayHit, 6f, StartOfRound.Instance.walkableSurfacesMask, QueryTriggerInteraction.Ignore))
+            {
+                if (!enemyRayHit.collider.CompareTag(StartOfRound.Instance.footstepSurfaces[currentFootstepSurfaceIndex].surfaceTag))
+                {
+                    for (int i = 0; i < StartOfRound.Instance.footstepSurfaces.Length; i++)
+                    {
+                        if (enemyRayHit.collider.CompareTag(StartOfRound.Instance.footstepSurfaces[i].surfaceTag))
+                        {
+                            currentFootstepSurfaceIndex = i;
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
+        [ClientRpc]
+        public void ToggleVisualKnifeClientRpc(bool enable)
+        {
+            if (knifeModel != null)
+            {
+                knifeModel.SetActive(enable);
+            }
+        }
+
+        public void SpawnKnifeItemLocally()
+        {
+            if (!IsServer) return;
+
+            Item knifeToDrop = null;
+            foreach (Item item in StartOfRound.Instance.allItemsList.itemsList)
+            {
+                if (item.itemName == "Kitchen knife" || item.itemName == "Knife")
+                {
+                    knifeToDrop = item;
+                    break;
+                }
+            }
+
+            if (knifeToDrop == null)
+            {
+                Plugin.Logger.LogWarning("Could not find the Knife item in the game's item database!");
+                return;
+            }
+
+            Vector3 spawnPos;
+            if (knifeModel != null)
+            {
+                spawnPos = knifeModel.transform.position;
+            }
+            else
+            {
+                spawnPos = transform.position + Vector3.up * 1.5f;
+            }
+
+            GameObject knifeDrop = Instantiate(knifeToDrop.spawnPrefab, spawnPos, Quaternion.identity, RoundManager.Instance.spawnedScrapContainer);
+            GrabbableObject knifeGrabbable = knifeDrop.GetComponent<GrabbableObject>();
+
+            knifeGrabbable.fallTime = 0f;
+            knifeGrabbable.targetFloorPosition = knifeGrabbable.GetItemFloorPosition(spawnPos);
+
+            int scrapValue = (int)(UnityEngine.Random.Range(knifeToDrop.minValue, knifeToDrop.maxValue) * RoundManager.Instance.scrapValueMultiplier);
+            knifeGrabbable.SetScrapValue(scrapValue);
+
+            knifeDrop.GetComponent<NetworkObject>().Spawn();
+            Plugin.Logger.LogInfo("Dropped knife scrap from the Chaser's hand!");
+        }
+
+        public void PlayFootstepSound()
+        {
+            Plugin.Logger.LogInfo("Footstep event fired!");
+            GetMaterialStandingOn();
+            int num = UnityEngine.Random.Range(0, StartOfRound.Instance.footstepSurfaces[currentFootstepSurfaceIndex].clips.Length);
+            if (num == previousFootstepClip)
+            {
+                num = (num + 1) % StartOfRound.Instance.footstepSurfaces[currentFootstepSurfaceIndex].clips.Length;
+            }
+            movementAudio.pitch = UnityEngine.Random.Range(0.93f, 1.07f);
+            movementAudio.PlayOneShot(StartOfRound.Instance.footstepSurfaces[currentFootstepSurfaceIndex].clips[num], 1f);
+            previousFootstepClip = num;
+        }
+
+        public override void AnimationEventA()
+        {
+            base.AnimationEventA();
+            PlayFootstepSound();
         }
 
         void ManageChaseState()
         {
             if (targetPlayer == null) return;
             GetComponentInChildren<Collider>().enabled = true;
-
             agent.speed = 8f;
 
-            if (targetPlayer.isInsideFactory == isOutside)
+            BustOpenDoorsInRadius();
+
+            bool playerIsOutside = !targetPlayer.isInsideFactory;
+            bool chaserIsOutside = this.isOutside;
+
+            if (playerIsOutside != chaserIsOutside)
             {
-                Vector3 doorInEnemyZone = RoundManager.FindMainEntrancePosition(true, isOutside);
+                Vector3 doorInEnemyZone = RoundManager.FindMainEntrancePosition(true, chaserIsOutside);
                 SetDestinationToPosition(doorInEnemyZone);
 
-                if (Vector3.Distance(transform.position, doorInEnemyZone) < 2f)
+                if (Vector3.Distance(transform.position, doorInEnemyZone) < 4f)
                 {
                     Plugin.Logger.LogInfo("Chaser is traversing the main door!");
-                    bool goingOutside = !isOutside;
-                    Vector3 doorInOtherZone = RoundManager.FindMainEntrancePosition(true, goingOutside);
-
-                    TeleportEnemyServerRpc(doorInOtherZone, goingOutside);
+                    bool goingOutside = !chaserIsOutside;
+                    Vector3 newPos = RoundManager.FindMainEntrancePosition(true, goingOutside);
+                    TeleportEnemyServerRpc(newPos, goingOutside);
                 }
             }
             else
             {
                 SetDestinationToPosition(targetPlayer.transform.position);
             }
+        }
 
-            chaseTimer += Time.deltaTime;
+        private void BustOpenDoorsInRadius()
+        {
+            if (!IsServer || cachedDoors == null) return;
 
-            if (chaseTimer > 60f)
+            float blastRangeSq = 16f;
+
+            foreach (DoorLock door in cachedDoors)
             {
-                chaseTimer = 0f;
-                GetComponentInChildren<Animator>().SetTrigger("collapseChaser");
-                SetChasePhysicsClientRpc(false);
+                if (door == null) continue;
 
-                SwitchToBehaviourClientRpc((int)State.Cooldown);
+                if ((transform.position - door.transform.position).sqrMagnitude < blastRangeSq)
+                {
+                    bool isOnCooldown = doorCooldowns.ContainsKey(door) && (Time.time - doorCooldowns[door] < 3f);
+                    if (isOnCooldown) continue;
+
+                    AnimatedObjectTrigger doorSwing = door.GetComponent<AnimatedObjectTrigger>();
+
+                    if (doorSwing != null && !doorSwing.boolValue)
+                    {
+                        if (door.isLocked)
+                        {
+                            door.UnlockDoorServerRpc();
+                        }
+
+                        doorSwing.TriggerAnimationNonPlayer(true, true, false);
+                        door.OpenDoorAsEnemyServerRpc();
+
+                        Plugin.Logger.LogInfo("Chaser blasted a door open from the cache!");
+
+                        doorCooldowns[door] = Time.time;
+                    }
+                }
+            }
+        }
+
+        private IEnumerator FlickerLightsDuringRise(float duration)
+        {
+            Light[] allLights = FindObjectsOfType<Light>();
+            Dictionary<Light, float> originalIntensities = new Dictionary<Light, float>();
+            List<Light> nearbyLights = new List<Light>();
+
+            float radiusSq = 20f * 20f; // 20 meter radius
+
+            foreach (Light l in allLights)
+            {
+                if (l == null || l.type == LightType.Directional) continue;
+
+                string nameLower = l.gameObject.name.ToLower();
+                if (nameLower.Contains("helmet") || nameLower.Contains("visor") || nameLower.Contains("sun")) continue;
+
+                if ((l.transform.position - transform.position).sqrMagnitude <= radiusSq)
+                {
+                    nearbyLights.Add(l);
+                    originalIntensities[l] = l.intensity;
+                }
+            }
+
+            float timer = 0f;
+            while (timer < duration)
+            {
+                foreach (Light l in nearbyLights)
+                {
+                    if (l != null && originalIntensities.ContainsKey(l))
+                    {
+                        float rand = UnityEngine.Random.value;
+                        if (rand > 0.8f) l.intensity = originalIntensities[l] * 2.5f; // Intense flash
+                        else if (rand > 0.5f) l.intensity = originalIntensities[l] * 0.1f; // Dim out
+                        else l.intensity = originalIntensities[l]; // Normal
+                    }
+                }
+
+                yield return new WaitForSeconds(0.1f);
+                timer += 0.1f;
+            }
+
+            foreach (var kvp in originalIntensities)
+            {
+                if (kvp.Key != null) kvp.Key.intensity = kvp.Value;
             }
         }
 
@@ -392,6 +630,7 @@ namespace Observers {
             yield return new WaitForSeconds(30f);
             isStartingCooldown = false;
             SwitchToBehaviourClientRpc((int)State.Observing);
+            creatureVoice.Stop();
         }
 
         public override void OnCollideWithPlayer(Collider other)
@@ -399,6 +638,7 @@ namespace Observers {
             base.OnCollideWithPlayer(other);
 
             if (isEnemyDead || currentBehaviourStateIndex != (int)State.Chase || attackCooldown > 0f) return;
+
             PlayerControllerB player = MeetsStandardPlayerCollisionConditions(other, false, true);
 
             if (player != null)
@@ -407,6 +647,16 @@ namespace Observers {
                 attackCooldown = 1.5f;
 
                 DoAnimationClientRpc("stabAttack");
+
+                if (knifeStabSounds != null && knifeStabSounds.Length > 0)
+                {
+                    int randomIndex = UnityEngine.Random.Range(0, knifeStabSounds.Length);
+                    if (knifeStabSounds[randomIndex] != null)
+                    {
+                        creatureSFX.PlayOneShot(knifeStabSounds[randomIndex], 1f);
+                    }
+                }
+
                 player.DamagePlayer(20, hasDamageSFX: true, callRPC: true, CauseOfDeath.Stabbing);
             }
         }
@@ -436,6 +686,10 @@ namespace Observers {
             agent.speed = 0f;
 
             DoAnimationClientRpc("hasBeenKilled");
+            PlayChaserSFXClientRpc("death");
+            creatureVoice.Stop();
+            ToggleVisualKnifeClientRpc(false);
+            if (IsServer) SpawnKnifeItemLocally();
 
             if (activeSiren != null)
             {
