@@ -22,7 +22,7 @@ namespace Observers.src
                 {
                     if (scrapRef.TryGet(out NetworkObject netObj))
                     { ulong id = netObj.NetworkObjectId;
-                        ObserverScrapListener.Instance.SpawnedScrapReg.Add(id);
+                        ObserverScrapListener.SpawnedScrapReg.Add(id);
                         Plugin.Logger.LogInfo($"Added scrap with ID {id} to SpawnedScrapReg");
                     }
                 }   
@@ -41,7 +41,7 @@ namespace Observers.src
                 {
                     ulong scrapId = netObj.NetworkObjectId;
                     ulong playerId = __instance.playerClientId;
-                    ObserverScrapListener.Instance.RegisterScrapPickup(playerId, scrapId);
+                    ObserverScrapListener.RegisterScrapPickup(playerId, scrapId);
                 }
             }
         }

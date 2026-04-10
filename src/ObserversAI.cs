@@ -26,6 +26,9 @@ namespace Observers {
         bool hasSpawnedSpectre = false;
         Vector3 mainEntrancePosition;
         bool isPlayingMarkAnimation = false;
+        float chaseTimer = 0f;
+        bool isStartingCooldown = false;
+
         enum State {
             Observing,
             MarkingPlayer,
@@ -44,6 +47,12 @@ namespace Observers {
             timeSinceNewRandPos = 0;
             enemyRandom = new System.Random(StartOfRound.Instance.randomMapSeed + thisEnemyIndex);
             isDeadAnimationDone = false;
+            Animator chaserAnim = GetComponentInChildren<Animator>();
+            if (chaserAnim != null)
+            {
+                chaserAnim.cullingMode = AnimatorCullingMode.AlwaysAnimate;
+                chaserAnim.enabled = true;
+            }
             currentBehaviourStateIndex = (int)State.Observing;
         }
 
@@ -94,28 +103,73 @@ namespace Observers {
                 }
             }
 
-            Vector3 spawnPos = doorPos + (bestDirection * (furthestDistance * 0.6f));
-            spawnPos.y += 15f;
+            Vector3 horizontalPos = doorPos + (bestDirection * (furthestDistance * 0.6f));
+
+            Vector3 skyPos = horizontalPos + (Vector3.up * 20f);
+            Vector3 groundPos = horizontalPos; // Fallback
+
+            if (Physics.Raycast(skyPos, Vector3.down, out RaycastHit groundHit, 60f, StartOfRound.Instance.collidersAndRoomMask))
+            {
+                groundPos = groundHit.point;
+            }
+
+            if (UnityEngine.AI.NavMesh.SamplePosition(groundPos, out UnityEngine.AI.NavMeshHit navHit, 10f, UnityEngine.AI.NavMesh.AllAreas))
+            {
+                groundPos = navHit.position;
+            }
+            else
+            {
+                groundPos = doorPos;
+                Plugin.Logger.LogWarning("ObserversAI: Could not find NavMesh for Spectre! Falling back to door.");
+            }
+
+            Vector3 finalSpawnPos = groundPos;
+            float desiredHoverHeight = 15f;
+
+            if (Physics.Raycast(groundPos + (Vector3.up * 0.5f), Vector3.up, out RaycastHit ceilingHit, desiredHoverHeight, StartOfRound.Instance.collidersAndRoomMask))
+            {
+                finalSpawnPos.y = ceilingHit.point.y - 2.0f; // 2 meters below the ceiling
+                Plugin.Logger.LogInfo("Ceiling detected above NavMesh. Adjusting Spectre hover height.");
+            }
+            else
+            {
+                finalSpawnPos.y += desiredHoverHeight;
+            }
+
+            Quaternion spawnRot = Quaternion.identity;
 
             if (Plugin.ObserverPrefab != null)
             {
-                GameObject activeObserver = Instantiate(Plugin.ObserverPrefab, spawnPos, Quaternion.identity);
-                Plugin.Logger.LogInfo("Observer Spectre spawned outside!");
+                Plugin.Logger.LogInfo("Host has calculated safe NavMesh spawn position. Sending to clients...");
                 hasSpawnedSpectre = true;
+                SpawnSpectreClientRpc(finalSpawnPos, spawnRot);
+            }
+        }
+
+        [ClientRpc]
+        public void SpawnSpectreClientRpc(Vector3 spawnPos, Quaternion spawnRot)
+        {
+            if (activeObserver == null && Plugin.ObserverPrefab!=null)
+            {
+                activeObserver = Instantiate(Plugin.ObserverPrefab, spawnPos, spawnRot);
             }
         }
 
         public void DespawnObserverSpectre()
         {
-            if (activeObserver != null)
-            {
-                Destroy(activeObserver);
-                Plugin.Logger.LogInfo("Observer Spectre despawned!");
-            }
+            if (!IsServer) return;
+            DespawnSpectreClientRpc();
             hasSpawnedSpectre = false;
         }
 
-
+        [ClientRpc]
+        public void DespawnSpectreClientRpc()
+        {
+            if (activeObserver != null)
+            {
+                Destroy(activeObserver);
+            }
+        }
 
         public override void Update() {
             base.Update();
@@ -157,13 +211,14 @@ namespace Observers {
                         SpawnObserverSpectre();
                     }
                     int activePlayers = Mathf.Min(StartOfRound.Instance.connectedPlayersAmount + 1, 4);
-                    int scrapThreshold = 8 - activePlayers;
+                    int scrapThreshold = 2 - activePlayers;
 
-                    PlayerControllerB greedyPlayer = ObserverScrapListener.Instance.CheckForGreedyPlayer(scrapThreshold);
+                    PlayerControllerB greedyPlayer = ObserverScrapListener.CheckForGreedyPlayer(scrapThreshold);
 
                     if (greedyPlayer != null)
                     {
                         targetPlayer = greedyPlayer;
+                        Plugin.Logger.LogInfo("greedy boy");
                         SwitchToBehaviourClientRpc((int)State.MarkingPlayer);
                     }
                     break;
@@ -174,7 +229,27 @@ namespace Observers {
 
                 case (int)State.Chase:
                     ManageChaseState();
+
                     break;
+
+                case (int)State.Cooldown:
+                    if (!isStartingCooldown)
+                    {
+                        isStartingCooldown = true;
+                        StartCoroutine(ManageCooldownState());
+                    }
+
+                    break;
+            }
+        }
+
+        [ClientRpc]
+        public void SetChasePhysicsClientRpc(bool enablePhysics)
+        {
+            GetComponentInChildren<Collider>().enabled = enablePhysics;
+            if (enablePhysics == false)
+            {
+                agent.speed = 0f;
             }
         }
 
@@ -213,10 +288,46 @@ namespace Observers {
         void ManageChaseState()
         {
             if (targetPlayer == null) return;
+            GetComponentInChildren<Collider>().enabled = true;
+            //creatureAnimator.SetTrigger("WakeUp");
             SetDestinationToPosition(targetPlayer.transform.position);
+
+            chaseTimer += Time.deltaTime;
+
+            if (chaseTimer > 60f)
+            {
+                chaseTimer = 0f;
+                GetComponentInChildren<Animator>().SetTrigger("collapseChaser");
+                SetChasePhysicsClientRpc(false);
+
+                SwitchToBehaviourClientRpc((int)State.Cooldown);
+            }
         }
 
-        
+
+        IEnumerator ManageCooldownState()
+        {
+            targetPlayer = null;
+            yield return new WaitForSeconds(30f);
+            isStartingCooldown = false;
+            SwitchToBehaviourClientRpc((int)State.Observing);
+        }
+
+        public override void OnCollideWithPlayer(Collider other)
+        {
+            if (timeSinceHittingLocalPlayer < 1f)
+            {
+                return;
+            }
+            PlayerControllerB playerControllerB = MeetsStandardPlayerCollisionConditions(other);
+
+            if (playerControllerB != null)
+            {
+                Plugin.Logger.LogInfo("Chaser stabbed the player");
+                timeSinceHittingLocalPlayer = 0f;
+                playerControllerB.DamagePlayer(20);
+            }
+        }
 
         //void StickingInFrontOfPlayer() {
         //    // We only run this method for the host because I'm paranoid about randomness not syncing I guess
