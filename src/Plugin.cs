@@ -16,6 +16,7 @@ namespace Observers {
         internal static new ManualLogSource Logger = null!;
         internal static PluginConfig BoundConfig { get; private set; } = null!;
         public static AssetBundle? ModAssets;
+        public static GameObject? SirenObj;
         public static GameObject? ObserverPrefab;
 
         private void Awake() {
@@ -33,6 +34,7 @@ namespace Observers {
                 return;
             }
             ObserverPrefab = ModAssets.LoadAsset<GameObject>("ObserverSpectre");
+            SirenObj = ModAssets.LoadAsset<GameObject>("SirenSFX");
             Logger.LogInfo("Observer Prefab loaded successfully!");
 
             var ObserversEnemy = ModAssets.LoadAsset<EnemyType>("ObserversEnemy");
@@ -40,6 +42,7 @@ namespace Observers {
             var ExampleEnemyTK = ModAssets.LoadAsset<TerminalKeyword>("ExampleEnemyTK");
 
             NetworkPrefabs.RegisterNetworkPrefab(ObserversEnemy.enemyPrefab);
+            NetworkPrefabs.RegisterNetworkPrefab(SirenObj);
 
             Enemies.RegisterEnemy(ObserversEnemy, BoundConfig.SpawnWeight.Value, Levels.LevelTypes.All, ExampleEnemyTN, ExampleEnemyTK);
             
