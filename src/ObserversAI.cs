@@ -6,13 +6,12 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using Unity.Netcode;
 using UnityEngine;
+using UnityEngine.UIElements;
 
 namespace Observers {
 
     class ObserversAI : EnemyAI
     {
-        // We set these in our Asset Bundle, so we can disable warning CS0649:
-        // Field 'field' is never assigned to, and will always have its default value 'value'
 #pragma warning disable 0649
         public GameObject activeObserver;
         public Transform turnCompass = null!;
@@ -33,11 +32,10 @@ namespace Observers {
         private float attackCooldown = 0f;
         private Ray enemyRay;
         private RaycastHit enemyRayHit;
-        private int currentFootstepSurfaceIndex;
-        private int previousFootstepClip;
+        public AudioClip[] customFootstepSounds;
+        private float footstepTimer = 0f;
         public AudioSource movementAudio;
         public GameObject knifeModel;
-        public Item knifeItemPrefab;
         public AudioClip[] knifeStabSounds;
         private DoorLock[] cachedDoors;
         private float slowScanTimer = 0f;
@@ -45,7 +43,22 @@ namespace Observers {
         private Dictionary<DoorLock, float> doorCooldowns = new Dictionary<DoorLock, float>();
         public AudioClip chaserDeathSound;
         public AudioClip chaserReanimateSound;
-
+        private Vector3 lastPosition;
+        private MineshaftElevatorController elevatorScript;
+        private bool isInElevatorStartRoom;
+        private bool isHalted = false;
+        public AudioSource markedLineAudio;
+        public ParticleSystem manifestationParticles;
+        public SkinnedMeshRenderer chaserRenderer;
+        public Mesh[] randomMeshes;
+        public GameObject[] meshVariants;
+        public GameObject[] knifeModels;
+        private EntranceTeleport[] allTeleports;
+        public GameObject possessionSwarmParticles;
+        public AudioClip tauntVoiceline;
+        public Transform handBone;
+        private ScanNodeProperties cachedScanNode;
+        private bool isStunned = false;
 
         enum State {
             Observing,
@@ -67,7 +80,38 @@ namespace Observers {
             timeSinceNewRandPos = 0;
             enemyRandom = new System.Random(StartOfRound.Instance.randomMapSeed + thisEnemyIndex);
             isDeadAnimationDone = false;
+            if (meshVariants != null && meshVariants.Length > 0)
+            {
+                foreach (GameObject variant in meshVariants)
+                {
+                    variant.SetActive(false);
+                }
 
+                int randomMeshIndex = enemyRandom.Next(0, meshVariants.Length);
+                GameObject chosenVariant = meshVariants[randomMeshIndex];
+
+                chosenVariant.SetActive(true);
+
+                SkinnedMeshRenderer chosenRenderer = chosenVariant.GetComponentInChildren<SkinnedMeshRenderer>();
+
+                if (chosenRenderer != null)
+                {
+                    this.skinnedMeshRenderers = new SkinnedMeshRenderer[] { chosenRenderer };
+                }
+
+                Plugin.Logger.LogInfo($"Spawned variant {randomMeshIndex} and linked its renderer!");
+            }
+
+            if (movementAudio != null)
+            {
+                movementAudio.spatialize = false;
+                if (SoundManager.Instance != null && SoundManager.Instance.diageticMixer != null)
+                {
+                    movementAudio.outputAudioMixerGroup = SoundManager.Instance.diageticMixer.FindMatchingGroups("Master")[0];
+                }
+            }
+
+            if (creatureSFX != null) creatureSFX.spatialize = false;
             Animator chaserAnim = GetComponentInChildren<Animator>();
             if (chaserAnim != null)
             {
@@ -95,9 +139,64 @@ namespace Observers {
         }
 
         public override void OnDestroy()
-        { 
+        {
             base.OnDestroy();
-            if (this.activeObserver != null) Destroy(this.activeObserver);
+
+            if (activeObserver != null) Destroy(activeObserver);
+            if (activeSiren != null) Destroy(activeSiren);
+            if (creatureVoice != null) creatureVoice.Stop();
+
+            Plugin.Logger.LogInfo("Chaser memory safely purged.");
+        }
+
+        private void OnEnable()
+        {
+            ObserversEventManager.OnShipLeft += HandleShipLeft;
+            ObserversEventManager.OnPlayerDied += HandlePlayerDeathOrDC;
+            ObserversEventManager.OnPlayerDisconnect += HandlePlayerDeathOrDC;
+        }
+
+        private void OnDisable()
+        {
+            ObserversEventManager.OnShipLeft -= HandleShipLeft;
+            ObserversEventManager.OnPlayerDied -= HandlePlayerDeathOrDC;
+            ObserversEventManager.OnPlayerDisconnect -= HandlePlayerDeathOrDC;
+        }
+
+        private void HandleShipLeft()
+        {
+            Plugin.Logger.LogInfo("Ship is leaving! Failsafe triggered to clean up Chaser...");
+
+            if (creatureVoice != null) creatureVoice.Stop();
+            if (activeSiren != null && activeSiren.GetComponent<NetworkObject>().IsSpawned)
+            {
+                activeSiren.GetComponent<NetworkObject>().Despawn();
+            }
+
+            DespawnObserverSpectre();
+            isHalted = false;
+            targetPlayer = null;
+            ObserverScrapListener.ClearData();
+        }
+
+        private void HandlePlayerDeathOrDC(PlayerControllerB player)
+        {
+            if (IsServer && !isEnemyDead && targetPlayer == player)
+            {
+                Plugin.Logger.LogInfo("Target died or disconnected via Event Manager! Retargeting cleanly...");
+
+                PlayerControllerB newVictim = GetClosestPlayer(requireLineOfSight: false);
+
+                if (newVictim != null)
+                {
+                    targetPlayer = newVictim;
+                    SyncNewTargetClientRpc((int)newVictim.playerClientId);
+                }
+                else
+                {
+                    SwitchToBehaviourClientRpc((int)State.Observing);
+                }
+            }
         }
 
         [ClientRpc]
@@ -112,6 +211,18 @@ namespace Observers {
         }
 
         [ClientRpc]
+        public void PlayVictimWhisperClientRpc(int victimClientId)
+        {
+            if ((int)GameNetworkManager.Instance.localPlayerController.playerClientId == victimClientId)
+            {
+                if (markedLineAudio != null)
+                {
+                    markedLineAudio.Play();
+                }
+            }
+        }
+
+        [ClientRpc]
         public void PlayChaserSFXClientRpc(string sfxType)
         {
             if (sfxType == "reanimate")
@@ -121,6 +232,22 @@ namespace Observers {
             else if (sfxType == "death" && dieSFX != null)
             {
                 creatureVoice.PlayOneShot(dieSFX);
+            }
+        }
+
+        [ClientRpc]
+        public void PlayClientFXClientRpc(int fxType)
+        {
+            if (fxType == 0)
+            {
+                StartCoroutine(FlickerLightsDuringRise(13.5f));
+            }
+            else if (fxType == 1)
+            {
+                if (!creatureVoice.isPlaying)
+                {
+                    creatureVoice.Play();
+                }
             }
         }
 
@@ -174,6 +301,11 @@ namespace Observers {
 
             spawnPos.y += 15f;
 
+            if (spawnPos.y < doorPos.y)
+            {
+                spawnPos.y = doorPos.y + 5f;
+            }
+
             Vector3 lookDirection = doorPos - spawnPos;
             lookDirection.y = 0;
             Quaternion spawnRot = Quaternion.LookRotation(lookDirection);
@@ -189,9 +321,43 @@ namespace Observers {
         [ClientRpc]
         public void SpawnSpectreClientRpc(Vector3 spawnPos, Quaternion spawnRot)
         {
-            if (activeObserver == null && Plugin.ObserverPrefab!=null)
+            if (activeObserver == null && Plugin.ObserverPrefab != null)
             {
                 activeObserver = Instantiate(Plugin.ObserverPrefab, spawnPos, spawnRot);
+
+                if (manifestationParticles != null)
+                {
+                    ParticleSystem burst = Instantiate(manifestationParticles, spawnPos + (Vector3.up * 1.5f), Quaternion.identity);
+                    burst.Play();
+                    Destroy(burst.gameObject, 3f);
+                }
+            }
+
+            ToggleAndMoveScanNode(true, spawnPos);
+        }
+
+        [ClientRpc]
+        public void SyncTargetClientRpc(int playerId)
+        {
+            targetPlayer = StartOfRound.Instance.allPlayerScripts[playerId];
+            Plugin.Logger.LogInfo($"Target synced to clients: {targetPlayer.playerUsername}");
+        }
+
+        [ClientRpc]
+        public void PlayTauntInEarClientRpc(ulong targetClientId)
+        {
+            if (StartOfRound.Instance.localPlayerController.actualClientId == targetClientId)
+            {
+
+                if (tauntVoiceline != null)
+                {
+                    HUDManager.Instance.UIAudio.PlayOneShot(tauntVoiceline, 1f);
+                    Plugin.Logger.LogInfo("Playing taunt directly into the victim's headset!");
+                }
+                else
+                {
+                    Plugin.Logger.LogWarning("Taunt voiceline is missing from the Inspector!");
+                }
             }
         }
 
@@ -209,11 +375,28 @@ namespace Observers {
             {
                 Destroy(activeObserver);
             }
+
+            ToggleAndMoveScanNode(false);
         }
 
         public override void Update()
         {
             base.Update();
+            if (stunNormalizedTimer > 0f)
+            {
+                agent.speed = 0f;
+
+                if (!isStunned)
+                {
+                    isStunned = true;
+                    DoAnimationClientRpc("hasBeenStunned");
+                    Plugin.Logger.LogInfo("Chaser has been stunned");
+                }
+            }
+            else
+            {
+                isStunned = false;
+            }
             if (attackCooldown > 0f)
             {
                 attackCooldown -= Time.deltaTime;
@@ -229,24 +412,63 @@ namespace Observers {
                 }
             }
 
-            if (!isEnemyDead && currentBehaviourStateIndex == (int)State.Chase)
+            if (IsServer && !isEnemyDead && currentBehaviourStateIndex == (int)State.Chase)
             {
                 chaseTimer += Time.deltaTime;
                 if (chaseTimer > 40f)
                 {
                     chaseTimer = 0f;
-                    agent.speed = 0f;
-
-                    DoAnimationClientRpc("hasBeenKilled");
-                    SetChasePhysicsClientRpc(false);
-
-                    ToggleVisualKnifeClientRpc(false);
-                    if (IsServer) SpawnKnifeItemLocally();
-
-                    if (dieSFX != null) creatureVoice.PlayOneShot(dieSFX);
-
-                    SwitchToBehaviourClientRpc((int)State.Cooldown);
+                    TriggerChaseEndClientRpc();
                 }
+            }
+            else if (currentBehaviourStateIndex == (int)State.Cooldown)
+            {
+                chaseTimer += Time.deltaTime;
+                if (chaseTimer > 30f)
+                {
+                    chaseTimer = 0f;
+                    targetPlayer = null;
+                    SwitchToBehaviourState((int)State.Observing);
+                }
+            }
+
+            if (IsServer && !isEnemyDead && (currentBehaviourStateIndex == (int)State.Chase || currentBehaviourStateIndex == (int)State.MarkingPlayer))
+            {
+                if (targetPlayer != null && (targetPlayer.isPlayerDead || !targetPlayer.isPlayerControlled))
+                {
+                    Plugin.Logger.LogInfo("Victim died! Chaser is finding a new target...");
+                    PlayerControllerB newVictim = GetClosestPlayer(requireLineOfSight: false);
+
+                    if (newVictim != null)
+                    {
+                        targetPlayer = newVictim;
+                        SyncNewTargetClientRpc((int)newVictim.playerClientId);
+                    }
+                    else
+                    {
+                        SwitchToBehaviourClientRpc((int)State.Observing); 
+                    }
+                }
+            }
+
+            if (!isEnemyDead && currentBehaviourStateIndex == (int)State.Chase)
+            {
+                HandleCustomFootsteps();
+
+                if (agent.speed == 0f && !isHalted)
+                {
+                    isHalted = true;
+                    DoAnimationClientRpc("isHalted"); 
+                }
+                else if (agent.speed > 0f && isHalted)
+                {
+                    isHalted = false;
+                    DoAnimationClientRpc("hasAccelerated");
+                }
+            }
+            else
+            {
+                isHalted = false;
             }
 
             var state = currentBehaviourStateIndex;
@@ -257,16 +479,22 @@ namespace Observers {
             if (activeObserver != null && !isEnemyDead &&
                 (currentBehaviourStateIndex == (int)State.Observing || currentBehaviourStateIndex == (int)State.MarkingPlayer))
             {
-                PlayerControllerB playerToWatch = targetPlayer;
-                if (playerToWatch == null) playerToWatch = GetClosestPlayer(requireLineOfSight: false);
+                PlayerControllerB playerToLookAt = null;
 
-                if (playerToWatch != null)
+                if (currentBehaviourStateIndex == (int)State.Observing)
+                {
+                    playerToLookAt = GameNetworkManager.Instance.localPlayerController;
+                }
+                else if (currentBehaviourStateIndex == (int)State.MarkingPlayer)
+                {
+                    playerToLookAt = targetPlayer;
+                }
+
+                if (playerToLookAt != null)
                 {
                     Animator obsAnim = activeObserver.GetComponentInChildren<Animator>();
                     if (obsAnim != null) obsAnim.applyRootMotion = false;
-
-                    Vector3 lookDir = playerToWatch.gameplayCamera.transform.position - activeObserver.transform.position;
-
+                    Vector3 lookDir = playerToLookAt.gameplayCamera.transform.position - activeObserver.transform.position;
                     lookDir.y = 0;
 
                     if (lookDir != Vector3.zero)
@@ -274,8 +502,29 @@ namespace Observers {
                         Quaternion targetRot = Quaternion.LookRotation(lookDir);
                         activeObserver.transform.rotation = Quaternion.Slerp(activeObserver.transform.rotation, targetRot, Time.deltaTime * 5f);
                     }
+
+                    Light eyeBeam = activeObserver.GetComponentInChildren<Light>();
+                    if (eyeBeam != null)
+                    {
+                        Vector3 beamLookDir = playerToLookAt.gameplayCamera.transform.position - eyeBeam.transform.position;
+                        if (beamLookDir != Vector3.zero)
+                        {
+                            eyeBeam.transform.rotation = Quaternion.Slerp(eyeBeam.transform.rotation, Quaternion.LookRotation(beamLookDir), Time.deltaTime * 10f);
+                        }
+                    }
+                }
+                if (cachedScanNode != null && cachedScanNode.gameObject.activeSelf)
+                {
+                    cachedScanNode.transform.position = activeObserver.transform.position + (Vector3.up * 1.5f);
                 }
             }
+        }
+        
+        [ClientRpc]
+        public void SyncNewTargetClientRpc(int newVictimId)
+        {
+            targetPlayer = StartOfRound.Instance.allPlayerScripts[newVictimId];
+            Plugin.Logger.LogInfo($"Clients synced new target: {targetPlayer.playerUsername}");
         }
 
         public override void DoAIInterval()
@@ -300,6 +549,7 @@ namespace Observers {
                     {
                         targetPlayer = greedyPlayer;
                         Plugin.Logger.LogInfo("greedy boy");
+                        SyncTargetClientRpc((int)greedyPlayer.playerClientId);
                         SwitchToBehaviourClientRpc((int)State.MarkingPlayer);
                     }
                     break;
@@ -316,12 +566,159 @@ namespace Observers {
                 case (int)State.Cooldown:
                     if (!isStartingCooldown)
                     {
-                        isStartingCooldown = true;
-                        StartCoroutine(ManageCooldownState());
                     }
 
                     break;
             }
+        }
+
+        private void ToggleAndMoveScanNode(bool enable, Vector3 newPosition = default)
+        {
+            ScanNodeProperties[] allScanNodes = GetComponentsInChildren<ScanNodeProperties>(true);
+
+            foreach (ScanNodeProperties scanNode in allScanNodes)
+            {
+                if (scanNode.nodeType == 1)
+                {
+                    cachedScanNode = scanNode;
+
+                    scanNode.gameObject.SetActive(enable);
+
+                    Collider scanCollider = scanNode.GetComponent<Collider>();
+                    if (scanCollider != null)
+                    {
+                        scanCollider.enabled = enable;
+                    }
+
+                    if (enable)
+                    {
+                        scanNode.transform.position = newPosition + (Vector3.up * 1.5f);
+                    }
+
+                    break;
+                }
+            }
+        }
+
+        [ClientRpc]
+        public void TogglePossessionSwarmClientRpc(bool enable)
+        {
+            if (possessionSwarmParticles != null)
+            {
+                possessionSwarmParticles.SetActive(enable);
+            }
+        }
+
+        private EntranceTeleport GetClosestDoorToPlayer()
+        {
+            if (targetPlayer == null) return null;
+
+            if (allTeleports == null || allTeleports.Length == 0)
+            {
+                allTeleports = FindObjectsOfType<EntranceTeleport>();
+            }
+
+            EntranceTeleport closestDoor = null;
+            float minDist = float.MaxValue;
+            bool playerIsOutside = !targetPlayer.isInsideFactory;
+
+            foreach (EntranceTeleport door in allTeleports)
+            {
+
+                if (door.isEntranceToBuilding == playerIsOutside)
+                {
+                    float dist = Vector3.Distance(targetPlayer.transform.position, door.transform.position);
+                    if (dist < minDist)
+                    {
+                        minDist = dist;
+                        closestDoor = door;
+                    }
+                }
+            }
+            return closestDoor;
+        }
+
+        private EntranceTeleport GetCorrespondingDoor(EntranceTeleport playerDoor)
+        {
+            if (playerDoor == null) return null;
+
+            foreach (EntranceTeleport chaserDoor in allTeleports)
+            {
+                if (chaserDoor.entranceId == playerDoor.entranceId && chaserDoor.isEntranceToBuilding != playerDoor.isEntranceToBuilding)
+                {
+                    return chaserDoor;
+                }
+            }
+            return null;
+        }
+
+        private void UseElevator(bool goUp)
+        {
+            if (elevatorScript == null) return;
+
+            Vector3 waitingPos = goUp ? elevatorScript.elevatorBottomPoint.position : elevatorScript.elevatorTopPoint.position;
+
+            bool isInside = Vector3.Distance(transform.position, elevatorScript.elevatorInsidePoint.position) < 2.5f;
+
+            if (isInside)
+            {
+                agent.speed = 0f;
+                SetDestinationToPosition(elevatorScript.elevatorInsidePoint.position);
+                if (elevatorScript.elevatorDoorOpen && elevatorScript.elevatorFinishedMoving && elevatorScript.elevatorMovingDown == goUp)
+                {
+                    elevatorScript.PressElevatorButtonOnServer(true);
+                }
+            }
+            else if (elevatorScript.elevatorFinishedMoving)
+            {
+                if (elevatorScript.elevatorDoorOpen)
+                {
+                    agent.speed = 8f;
+                    SetDestinationToPosition(elevatorScript.elevatorInsidePoint.position);
+                }
+                else
+                {
+                    agent.speed = 8f;
+                    SetDestinationToPosition(waitingPos);
+
+                    if (Vector3.Distance(transform.position, waitingPos) < 1.5f && elevatorScript.elevatorMovingDown != goUp && !elevatorScript.elevatorCalled)
+                    {
+                        elevatorScript.CallElevatorOnServer(goUp);
+                    }
+                }
+            }
+            else
+            {
+                agent.speed = 8f;
+                SetDestinationToPosition(waitingPos);
+            }
+        }
+
+        [ClientRpc]
+        public void TriggerChaseEndClientRpc()
+        {
+            creatureVoice.Stop();
+            if (dieSFX != null)
+            {
+                creatureSFX.PlayOneShot(dieSFX, 1f);
+            }
+
+            agent.speed = 0f;
+            SetChasePhysicsClientRpc(false);
+            DoAnimationClientRpc("hasBeenKilled");
+
+            if (IsServer)
+            {
+                SpawnKnifeItemLocally();
+                SwitchToBehaviourClientRpc((int)State.Cooldown);
+                if (activeSiren != null)
+                {
+                    activeSiren.GetComponent<NetworkObject>().Despawn();
+                }
+            }
+
+            ToggleVisualKnifeClientRpc(false);
+            activeSiren = null;
         }
 
         [ClientRpc]
@@ -340,7 +737,7 @@ namespace Observers {
 
             Vector3 triggerPos = activeObserver != null ? activeObserver.transform.position : RoundManager.FindMainEntrancePosition(true, isOutside);
 
-            if (Vector3.Distance(targetPlayer.transform.position, triggerPos) < 15f)
+            if (Vector3.Distance(targetPlayer.transform.position, triggerPos) < 20f)
             {
                 if (!isPlayingMarkAnimation)
                 {
@@ -348,6 +745,32 @@ namespace Observers {
                     StartCoroutine(MarkAndChaseSequence());
                 }
             }
+        }
+
+        private void HandleCustomFootsteps()
+        {
+            float distanceMoved = Vector3.Distance(transform.position, lastPosition);
+
+            if (distanceMoved > 0.02f)
+            {
+                footstepTimer += Time.deltaTime;
+                if (footstepTimer > 0.35f)
+                {
+                    footstepTimer = 0f;
+
+                    if (customFootstepSounds != null && customFootstepSounds.Length > 0 && movementAudio != null)
+                    {
+                        int randomIndex = UnityEngine.Random.Range(0, customFootstepSounds.Length);
+                        movementAudio.pitch = UnityEngine.Random.Range(0.9f, 1.1f);
+                        movementAudio.PlayOneShot(customFootstepSounds[randomIndex], 1f);
+                    }
+                }
+            }
+            else
+            {
+                footstepTimer = 0f;
+            }
+            lastPosition = transform.position;
         }
 
         [ClientRpc]
@@ -374,51 +797,49 @@ namespace Observers {
                 activeSiren = Instantiate(Plugin.SirenObj, skyPosition, Quaternion.identity);
                 activeSiren.GetComponent<NetworkObject>().Spawn();
             }
+            if (IsServer && targetPlayer != null)
+            {
+                PlayTauntInEarClientRpc(targetPlayer.actualClientId);
+            }
 
             SpectreAnimationClientRpc("isMarked");
 
+            if (targetPlayer != null)
+            {
+                PlayVictimWhisperClientRpc((int)targetPlayer.playerClientId);
+            }
+
             yield return new WaitForSeconds(15f);
+            if (isEnemyDead) yield break;
 
             DespawnObserverSpectre();
             DoAnimationClientRpc("hasBeenSummoned");
             ToggleVisualKnifeClientRpc(true);
+            PlayClientFXClientRpc(0);
             PlayChaserSFXClientRpc("reanimate");
-            StartCoroutine(FlickerLightsDuringRise(13.5f));
-            yield return new WaitForSeconds(13.5f);
+            TogglePossessionSwarmClientRpc(true);
+            StartCoroutine(FlickerLightsDuringRise(11.4f));
+            yield return new WaitForSeconds(11.4f);
+            TogglePossessionSwarmClientRpc(false);
+            if (isEnemyDead) yield break;
+            PlayClientFXClientRpc(1);
             DoAnimationClientRpc("riseFinished");
-            if (!creatureVoice.isPlaying)
-            {
-                creatureVoice.Play();
-            }
             SwitchToBehaviourClientRpc((int)State.Chase);
             isPlayingMarkAnimation = false;
-        }
-
-        public void GetMaterialStandingOn()
-        {
-            enemyRay = new Ray(base.transform.position + Vector3.up, -Vector3.up);
-            if (Physics.Raycast(enemyRay, out enemyRayHit, 6f, StartOfRound.Instance.walkableSurfacesMask, QueryTriggerInteraction.Ignore))
-            {
-                if (!enemyRayHit.collider.CompareTag(StartOfRound.Instance.footstepSurfaces[currentFootstepSurfaceIndex].surfaceTag))
-                {
-                    for (int i = 0; i < StartOfRound.Instance.footstepSurfaces.Length; i++)
-                    {
-                        if (enemyRayHit.collider.CompareTag(StartOfRound.Instance.footstepSurfaces[i].surfaceTag))
-                        {
-                            currentFootstepSurfaceIndex = i;
-                            return;
-                        }
-                    }
-                }
-            }
         }
 
         [ClientRpc]
         public void ToggleVisualKnifeClientRpc(bool enable)
         {
-            if (knifeModel != null)
+            if (knifeModels != null && knifeModels.Length > 0)
             {
-                knifeModel.SetActive(enable);
+                foreach (GameObject knife in knifeModels)
+                {
+                    if (knife != null)
+                    {
+                        knife.SetActive(enable);
+                    }
+                }
             }
         }
 
@@ -436,82 +857,110 @@ namespace Observers {
                 }
             }
 
-            if (knifeToDrop == null)
+            if (knifeToDrop == null) return;
+
+            Vector3 rawSpawnPos = (handBone != null) ? handBone.position : transform.position + (Vector3.up * 1.5f);
+
+            Vector3 safeSpawnPos = RoundManager.Instance.GetNavMeshPosition(rawSpawnPos, RoundManager.Instance.navHit, 5f, -1);
+            if (!RoundManager.Instance.GotNavMeshPositionResult)
             {
-                Plugin.Logger.LogWarning("Could not find the Knife item in the game's item database!");
-                return;
+                safeSpawnPos = transform.position; 
             }
 
-            Vector3 spawnPos;
-            if (knifeModel != null)
-            {
-                spawnPos = knifeModel.transform.position;
-            }
-            else
-            {
-                spawnPos = transform.position + Vector3.up * 1.5f;
-            }
+            safeSpawnPos.y += 1.0f;
 
-            GameObject knifeDrop = Instantiate(knifeToDrop.spawnPrefab, spawnPos, Quaternion.identity, RoundManager.Instance.spawnedScrapContainer);
+            GameObject knifeDrop = Instantiate(knifeToDrop.spawnPrefab, safeSpawnPos, Quaternion.identity, RoundManager.Instance.spawnedScrapContainer);
             GrabbableObject knifeGrabbable = knifeDrop.GetComponent<GrabbableObject>();
 
             knifeGrabbable.fallTime = 0f;
-            knifeGrabbable.targetFloorPosition = knifeGrabbable.GetItemFloorPosition(spawnPos);
+            knifeGrabbable.targetFloorPosition = knifeGrabbable.GetItemFloorPosition(safeSpawnPos);
 
             int scrapValue = (int)(UnityEngine.Random.Range(knifeToDrop.minValue, knifeToDrop.maxValue) * RoundManager.Instance.scrapValueMultiplier);
             knifeGrabbable.SetScrapValue(scrapValue);
 
             knifeDrop.GetComponent<NetworkObject>().Spawn();
-            Plugin.Logger.LogInfo("Dropped knife scrap from the Chaser's hand!");
-        }
 
-        public void PlayFootstepSound()
-        {
-            Plugin.Logger.LogInfo("Footstep event fired!");
-            GetMaterialStandingOn();
-            int num = UnityEngine.Random.Range(0, StartOfRound.Instance.footstepSurfaces[currentFootstepSurfaceIndex].clips.Length);
-            if (num == previousFootstepClip)
-            {
-                num = (num + 1) % StartOfRound.Instance.footstepSurfaces[currentFootstepSurfaceIndex].clips.Length;
-            }
-            movementAudio.pitch = UnityEngine.Random.Range(0.93f, 1.07f);
-            movementAudio.PlayOneShot(StartOfRound.Instance.footstepSurfaces[currentFootstepSurfaceIndex].clips[num], 1f);
-            previousFootstepClip = num;
-        }
+            knifeGrabbable.EnableItemMeshes(true);
 
-        public override void AnimationEventA()
-        {
-            base.AnimationEventA();
-            PlayFootstepSound();
+            Plugin.Logger.LogInfo("Dropped real Kitchen Knife scrap from the hand bone!");
         }
 
         void ManageChaseState()
         {
             if (targetPlayer == null) return;
-            GetComponentInChildren<Collider>().enabled = true;
-            agent.speed = 8f;
+            bool playerIsOutside = !targetPlayer.isInsideFactory;
+            bool chaserIsOutside = this.isOutside;
+            if (playerIsOutside && !chaserIsOutside)
+            {
+                agent.speed = 13f;
+            }
+            else
+            {
+                agent.speed = 8f; 
+            }
 
             BustOpenDoorsInRadius();
 
-            bool playerIsOutside = !targetPlayer.isInsideFactory;
-            bool chaserIsOutside = this.isOutside;
+            if (!isOutside && RoundManager.Instance.currentDungeonType == 4)
+            {
+                if (elevatorScript == null) elevatorScript = FindObjectOfType<MineshaftElevatorController>();
+
+                if (elevatorScript != null)
+                {
+                    if (Vector3.Distance(transform.position, elevatorScript.elevatorBottomPoint.position) < 10f)
+                        isInElevatorStartRoom = false; 
+                    else if (Vector3.Distance(transform.position, elevatorScript.elevatorTopPoint.position) < 10f)
+                        isInElevatorStartRoom = true; 
+
+                    bool playerAtBottom = targetPlayer.transform.position.y < elevatorScript.elevatorBottomPoint.position.y + 10f;
+                    bool playerAtTop = targetPlayer.transform.position.y > elevatorScript.elevatorTopPoint.position.y - 10f;
+
+                    if ((isInElevatorStartRoom && playerAtBottom) || (!isInElevatorStartRoom && playerAtTop))
+                    {
+                        bool goUp = !isInElevatorStartRoom;
+                        UseElevator(goUp);
+                        return;
+                    }
+                }
+            }
 
             if (playerIsOutside != chaserIsOutside)
             {
-                Vector3 doorInEnemyZone = RoundManager.FindMainEntrancePosition(true, chaserIsOutside);
-                SetDestinationToPosition(doorInEnemyZone);
+                movingTowardsTargetPlayer = false;
 
-                if (Vector3.Distance(transform.position, doorInEnemyZone) < 4f)
+                EntranceTeleport doorNearPlayer = GetClosestDoorToPlayer();
+                EntranceTeleport doorInEnemyZone = GetCorrespondingDoor(doorNearPlayer);
+
+                if (doorInEnemyZone != null)
                 {
-                    Plugin.Logger.LogInfo("Chaser is traversing the main door!");
-                    bool goingOutside = !chaserIsOutside;
-                    Vector3 newPos = RoundManager.FindMainEntrancePosition(true, goingOutside);
-                    TeleportEnemyServerRpc(newPos, goingOutside);
+                    Vector3 doorPos = doorInEnemyZone.transform.position;
+                    SetDestinationToPosition(doorPos);
+
+                    if (Vector3.Distance(transform.position, doorPos) < 4f)
+                    {
+                        Plugin.Logger.LogInfo($"Chaser is traversing door ID {doorInEnemyZone.entranceId}!");
+                        bool goingOutside = !chaserIsOutside;
+                        Vector3 newPos = doorNearPlayer.entrancePoint != null ? doorNearPlayer.entrancePoint.position : doorNearPlayer.transform.position;
+                        TeleportEnemyServerRpc(newPos, goingOutside);
+                    }
+                }
+                else
+                {
+                    Vector3 fallbackDoor = RoundManager.FindMainEntrancePosition(true, chaserIsOutside);
+                    SetDestinationToPosition(fallbackDoor);
+
+                    if (Vector3.Distance(transform.position, fallbackDoor) < 4f)
+                    {
+                        bool goingOutside = !chaserIsOutside;
+                        Vector3 newPos = RoundManager.FindMainEntrancePosition(true, goingOutside);
+                        TeleportEnemyServerRpc(newPos, goingOutside);
+                    }
                 }
             }
             else
             {
-                SetDestinationToPosition(targetPlayer.transform.position);
+                moveTowardsDestination = true;
+                SetMovingTowardsTargetPlayer(targetPlayer);
             }
         }
 
@@ -519,13 +968,13 @@ namespace Observers {
         {
             if (!IsServer || cachedDoors == null) return;
 
-            float blastRangeSq = 16f;
+            float bashRangeSq = 4f;
 
             foreach (DoorLock door in cachedDoors)
             {
                 if (door == null) continue;
 
-                if ((transform.position - door.transform.position).sqrMagnitude < blastRangeSq)
+                if ((transform.position - door.transform.position).sqrMagnitude < bashRangeSq)
                 {
                     bool isOnCooldown = doorCooldowns.ContainsKey(door) && (Time.time - doorCooldowns[door] < 3f);
                     if (isOnCooldown) continue;
@@ -539,10 +988,12 @@ namespace Observers {
                             door.UnlockDoorServerRpc();
                         }
 
+                        DoAnimationClientRpc("bashDoor");
+
                         doorSwing.TriggerAnimationNonPlayer(true, true, false);
                         door.OpenDoorAsEnemyServerRpc();
 
-                        Plugin.Logger.LogInfo("Chaser blasted a door open from the cache!");
+                        Plugin.Logger.LogInfo("Chaser bashed a door open!");
 
                         doorCooldowns[door] = Time.time;
                     }
@@ -624,20 +1075,11 @@ namespace Observers {
             }
         }
 
-        IEnumerator ManageCooldownState()
-        {
-            targetPlayer = null;
-            yield return new WaitForSeconds(30f);
-            isStartingCooldown = false;
-            SwitchToBehaviourClientRpc((int)State.Observing);
-            creatureVoice.Stop();
-        }
-
         public override void OnCollideWithPlayer(Collider other)
         {
             base.OnCollideWithPlayer(other);
 
-            if (isEnemyDead || currentBehaviourStateIndex != (int)State.Chase || attackCooldown > 0f) return;
+            if (isEnemyDead || currentBehaviourStateIndex != (int)State.Chase || attackCooldown > 0f || stunNormalizedTimer > 0f) return;
 
             PlayerControllerB player = MeetsStandardPlayerCollisionConditions(other, false, true);
 
@@ -681,20 +1123,33 @@ namespace Observers {
 
         public override void KillEnemy(bool destroy = false)
         {
+            AudioClip nativeDeathSound = dieSFX;
+            dieSFX = null;
+
             base.KillEnemy(destroy);
+
+            dieSFX = nativeDeathSound;
+
             isEnemyDead = true;
             agent.speed = 0f;
 
             DoAnimationClientRpc("hasBeenKilled");
-            PlayChaserSFXClientRpc("death");
             creatureVoice.Stop();
-            ToggleVisualKnifeClientRpc(false);
+
+            if (dieSFX != null)
+            {
+                creatureSFX.PlayOneShot(dieSFX, 1f);
+            }
+
             if (IsServer) SpawnKnifeItemLocally();
+
+            ToggleVisualKnifeClientRpc(false);
 
             if (activeSiren != null)
             {
                 activeSiren.GetComponent<NetworkObject>().Despawn();
             }
+            activeSiren = null;
 
             DespawnObserverSpectre();
             Plugin.Logger.LogInfo("The Chaser has been killed.");

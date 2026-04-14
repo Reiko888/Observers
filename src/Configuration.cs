@@ -10,7 +10,7 @@ namespace Observers.Configuration {
         public ConfigEntry<int> SpawnWeight;
         public PluginConfig(ConfigFile cfg)
         {
-            SpawnWeight = cfg.Bind("General", "Spawn weight", 20,
+            SpawnWeight = cfg.Bind("General", "Spawn weight", 100,
                 "The spawn chance weight for ExampleEnemy, relative to other existing enemies.\n" +
                 "Goes up from 0, lower is more rare, 100 and up is very common.");
             

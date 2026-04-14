@@ -13,10 +13,15 @@ namespace Observers.src
     {
         public static Dictionary<ulong, HashSet<ulong>> playerScrapReg = new Dictionary<ulong, HashSet<ulong>>();
         public static HashSet<ulong> SpawnedScrapReg = new HashSet<ulong>();
+        public static HashSet<ulong> globallyFoundScrapIDs = new HashSet<ulong>();
 
         public static void RegisterScrapPickup(ulong playerId, ulong scrapId)
         {
             if (!SpawnedScrapReg.Contains(scrapId)) return;
+
+            if (globallyFoundScrapIDs.Contains(scrapId)) return;
+
+            globallyFoundScrapIDs.Add(scrapId);
 
             if (!playerScrapReg.ContainsKey(playerId))
             {
@@ -42,6 +47,7 @@ namespace Observers.src
         {
             playerScrapReg.Clear();
             SpawnedScrapReg.Clear();
+            globallyFoundScrapIDs.Clear();
             Plugin.Logger.LogInfo("Scrap list cleared for new round");
         }
     }

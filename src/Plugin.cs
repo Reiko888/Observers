@@ -10,7 +10,7 @@ using UnityEngine;
 using static Observers.src.ScrapListenerPatch;
 
 namespace Observers {
-    [BepInPlugin("Reiko888.Observers", "Observers", "1.0.0")]
+    [BepInPlugin("Reiko888.Observer", "Observer", "1.0.0")]
     [BepInDependency(LethalLib.Plugin.ModGUID)] 
     public class Plugin : BaseUnityPlugin {
         internal static new ManualLogSource Logger = null!;
@@ -20,7 +20,7 @@ namespace Observers {
         public static GameObject? ObserverPrefab;
 
         private void Awake() {
-            Harmony harmony = new Harmony("Reiko888.Observers");
+            Harmony harmony = new Harmony("Reiko888.Observer");
             harmony.PatchAll(Assembly.GetExecutingAssembly());
             Logger = base.Logger;
 
@@ -38,15 +38,15 @@ namespace Observers {
             Logger.LogInfo("Observer Prefab loaded successfully!");
 
             var ObserversEnemy = ModAssets.LoadAsset<EnemyType>("ObserversEnemy");
-            var ExampleEnemyTN = ModAssets.LoadAsset<TerminalNode>("ExampleEnemyTN");
-            var ExampleEnemyTK = ModAssets.LoadAsset<TerminalKeyword>("ExampleEnemyTK");
+            var ObserverTN = ModAssets.LoadAsset<TerminalNode>("ObserverTN");
+            var ObserverTK = ModAssets.LoadAsset<TerminalKeyword>("ObserverTK");
 
             NetworkPrefabs.RegisterNetworkPrefab(ObserversEnemy.enemyPrefab);
             NetworkPrefabs.RegisterNetworkPrefab(SirenObj);
 
-            Enemies.RegisterEnemy(ObserversEnemy, BoundConfig.SpawnWeight.Value, Levels.LevelTypes.All, ExampleEnemyTN, ExampleEnemyTK);
+            Enemies.RegisterEnemy(ObserversEnemy, BoundConfig.SpawnWeight.Value, Levels.LevelTypes.All, ObserverTN, ObserverTK);
             
-            Logger.LogInfo($"Plugin Observers is loaded!");
+            Logger.LogInfo($"Observer enemy has loaded!");
         }
 
         private static void InitializeNetworkBehaviours() {
