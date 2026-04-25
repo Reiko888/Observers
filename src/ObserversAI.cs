@@ -14,15 +14,9 @@ namespace Observers {
     {
 #pragma warning disable 0649
         public GameObject activeObserver;
-        public Transform turnCompass = null!;
         public Transform attackArea = null!;
-        #pragma warning restore 0649
-        float timeSinceHittingLocalPlayer;
-        float timeSinceNewRandPos;
-        Vector3 positionRandomness;
-        Vector3 StalkPos;
+#pragma warning restore 0649
         System.Random enemyRandom = null!;
-        bool isDeadAnimationDone;
         bool hasSpawnedSpectre = false;
         Vector3 mainEntrancePosition;
         bool isPlayingMarkAnimation = false;
@@ -59,6 +53,8 @@ namespace Observers {
         public Transform handBone;
         private ScanNodeProperties cachedScanNode;
         private bool isStunned = false;
+        private float slowDownTimer = 0f;
+        private float currentChaseDuration = 0f;
 
         enum State {
             Observing,
@@ -75,11 +71,27 @@ namespace Observers {
         public override void Start()
         {
             base.Start();
-            LogIfDebugBuild("Observers Spawned");
-            enemyHP = 4;
-            timeSinceNewRandPos = 0;
+            LogIfDebugBuild("Observer Spawned");
+            isHalted = true;
+            enemyHP = Plugin.BoundConfig.ChaserHealth.Value;
+
+            if (enemyType != null)
+            {
+                enemyType.stunTimeMultiplier = Plugin.BoundConfig.ChaserStunMultiplier.Value;
+            }
+
+            if (attackArea != null)
+            {
+                Vector3 newScale = attackArea.localScale;
+                newScale.z = Plugin.BoundConfig.ChaserHitRange.Value;
+                attackArea.localScale = newScale;
+
+                Vector3 newPos = attackArea.localPosition;
+                newPos.z = newScale.z / 2f;
+                attackArea.localPosition = newPos;
+            }
+
             enemyRandom = new System.Random(StartOfRound.Instance.randomMapSeed + thisEnemyIndex);
-            isDeadAnimationDone = false;
             if (meshVariants != null && meshVariants.Length > 0)
             {
                 foreach (GameObject variant in meshVariants)
@@ -99,7 +111,7 @@ namespace Observers {
                     this.skinnedMeshRenderers = new SkinnedMeshRenderer[] { chosenRenderer };
                 }
 
-                Plugin.Logger.LogInfo($"Spawned variant {randomMeshIndex} and linked its renderer!");
+                Plugin.Logger.LogInfo($"Spawned variant {randomMeshIndex}");
             }
 
             if (movementAudio != null)
@@ -117,11 +129,7 @@ namespace Observers {
             {
                 chaserAnim.cullingMode = AnimatorCullingMode.AlwaysAnimate;
                 chaserAnim.enabled = true;
-            }
-
-            if (creatureSFX != null)
-            {
-                creatureSFX.spatialize = false;
+                chaserAnim.applyRootMotion = false;
             }
 
             base.GetAINodes();
@@ -132,7 +140,22 @@ namespace Observers {
                 Transform randomNode = allAINodes[enemyRandom.Next(0, allAINodes.Length)].transform;
                 agent.Warp(randomNode.position);
                 SyncPositionToClients();
-                Plugin.Logger.LogInfo("Warped Chaser to a random internal AI node.");
+                Plugin.Logger.LogInfo("Warped Chaser to a random internal AI node");
+            }
+
+            ScanNodeProperties scanNode = GetComponentInChildren<ScanNodeProperties>(true);
+            Terminal terminal = FindObjectOfType<Terminal>();
+
+            if (scanNode != null && terminal != null)
+            {
+                foreach (TerminalNode node in terminal.enemyFiles)
+                {
+                    if (node != null && node.creatureName == "Observer")
+                    {
+                        scanNode.creatureScanID = node.creatureFileID;
+                        break;
+                    }
+                }
             }
 
             currentBehaviourStateIndex = (int)State.Observing;
@@ -146,7 +169,7 @@ namespace Observers {
             if (activeSiren != null) Destroy(activeSiren);
             if (creatureVoice != null) creatureVoice.Stop();
 
-            Plugin.Logger.LogInfo("Chaser memory safely purged.");
+            Plugin.Logger.LogInfo("Enemy destroyed");
         }
 
         private void OnEnable()
@@ -165,7 +188,7 @@ namespace Observers {
 
         private void HandleShipLeft()
         {
-            Plugin.Logger.LogInfo("Ship is leaving! Failsafe triggered to clean up Chaser...");
+            Plugin.Logger.LogInfo("Ship is leaving! Cleaning up");
 
             if (creatureVoice != null) creatureVoice.Stop();
             if (activeSiren != null && activeSiren.GetComponent<NetworkObject>().IsSpawned)
@@ -183,18 +206,11 @@ namespace Observers {
         {
             if (IsServer && !isEnemyDead && targetPlayer == player)
             {
-                Plugin.Logger.LogInfo("Target died or disconnected via Event Manager! Retargeting cleanly...");
+                Plugin.Logger.LogInfo("Target died or disconnected.");
 
-                PlayerControllerB newVictim = GetClosestPlayer(requireLineOfSight: false);
-
-                if (newVictim != null)
+                if (currentBehaviourStateIndex == (int)State.Chase || currentBehaviourStateIndex == (int)State.MarkingPlayer)
                 {
-                    targetPlayer = newVictim;
-                    SyncNewTargetClientRpc((int)newVictim.playerClientId);
-                }
-                else
-                {
-                    SwitchToBehaviourClientRpc((int)State.Observing);
+                    TriggerChaseEndClientRpc();
                 }
             }
         }
@@ -206,7 +222,6 @@ namespace Observers {
             if (chaserAnim != null)
             {
                 chaserAnim.SetTrigger(animationTrigger);
-                Plugin.Logger.LogInfo($"Triggered animation: {animationTrigger}");
             }
         }
 
@@ -240,7 +255,7 @@ namespace Observers {
         {
             if (fxType == 0)
             {
-                StartCoroutine(FlickerLightsDuringRise(13.5f));
+                StartCoroutine(FlickerLightsDuringRise(7f));
             }
             else if (fxType == 1)
             {
@@ -324,14 +339,9 @@ namespace Observers {
             if (activeObserver == null && Plugin.ObserverPrefab != null)
             {
                 activeObserver = Instantiate(Plugin.ObserverPrefab, spawnPos, spawnRot);
-
-                if (manifestationParticles != null)
-                {
-                    ParticleSystem burst = Instantiate(manifestationParticles, spawnPos + (Vector3.up * 1.5f), Quaternion.identity);
-                    burst.Play();
-                    Destroy(burst.gameObject, 3f);
-                }
             }
+
+            Instantiate(Plugin.ManifestParticles, spawnPos + (Vector3.up * 1.5f), Quaternion.identity);
 
             ToggleAndMoveScanNode(true, spawnPos);
         }
@@ -352,11 +362,10 @@ namespace Observers {
                 if (tauntVoiceline != null)
                 {
                     HUDManager.Instance.UIAudio.PlayOneShot(tauntVoiceline, 1f);
-                    Plugin.Logger.LogInfo("Playing taunt directly into the victim's headset!");
                 }
                 else
                 {
-                    Plugin.Logger.LogWarning("Taunt voiceline is missing from the Inspector!");
+                    Plugin.Logger.LogWarning("Taunt voiceline is missing");
                 }
             }
         }
@@ -373,6 +382,19 @@ namespace Observers {
         {
             if (activeObserver != null)
             {
+                Vector3 spawnPos = activeObserver.transform.position;
+                if (manifestationParticles != null)
+                {
+                    ParticleSystem burst = Instantiate(manifestationParticles, spawnPos + (Vector3.up * 1.5f), Quaternion.identity);
+                    burst.gameObject.SetActive(true);
+                    burst.Play(true);
+                    Destroy(burst.gameObject, 3f);
+                }
+                else
+                {
+                    Plugin.Logger.LogWarning("Manifest particles are missing in the Inspector! Skipping despawn VFX.");
+                }
+
                 Destroy(activeObserver);
             }
 
@@ -397,6 +419,7 @@ namespace Observers {
             {
                 isStunned = false;
             }
+
             if (attackCooldown > 0f)
             {
                 attackCooldown -= Time.deltaTime;
@@ -412,15 +435,46 @@ namespace Observers {
                 }
             }
 
-            if (IsServer && !isEnemyDead && currentBehaviourStateIndex == (int)State.Chase)
+            if (!isEnemyDead && currentBehaviourStateIndex == (int)State.Chase && stunNormalizedTimer <= 0f)
             {
-                chaseTimer += Time.deltaTime;
-                if (chaseTimer > 40f)
+                if (IsServer)
                 {
-                    chaseTimer = 0f;
-                    TriggerChaseEndClientRpc();
+                    currentChaseDuration += Time.deltaTime;
+                    if (currentChaseDuration >= Plugin.BoundConfig.BaseChaseTime.Value)
+                    {
+                        Plugin.Logger.LogInfo("Chase time expired");
+                        TriggerChaseEndClientRpc();
+                        return;
+                    }
+                }
+
+                if (attackCooldown <= 0f && targetPlayer != null && attackArea != null)
+                {
+                    PlayerControllerB localPlayer = GameNetworkManager.Instance.localPlayerController;
+                    if (localPlayer != null && !localPlayer.isPlayerDead && localPlayer == targetPlayer)
+                    {
+                        int playerLayer = 1 << 3;
+                        Collider[] hitColliders = Physics.OverlapBox(attackArea.position, attackArea.localScale / 2f, attackArea.rotation, playerLayer);
+
+                        foreach (var playerCollider in hitColliders)
+                        {
+                            PlayerControllerB player = MeetsStandardPlayerCollisionConditions(playerCollider);
+
+                            if (player == localPlayer)
+                            {
+                                Plugin.Logger.LogInfo("Target stabbed");
+                                localPlayer.DamagePlayer(Plugin.BoundConfig.ChaserDamage.Value, hasDamageSFX: true, callRPC: true, CauseOfDeath.Stabbing);
+
+                                attackCooldown = 1.5f;
+                                slowDownTimer = 1.5f;
+                                TriggerAttackAnimationServerRpc();
+                                break;
+                            }
+                        }
+                    }
                 }
             }
+
             else if (currentBehaviourStateIndex == (int)State.Cooldown)
             {
                 chaseTimer += Time.deltaTime;
@@ -432,28 +486,22 @@ namespace Observers {
                 }
             }
 
+            if (slowDownTimer > 0f) slowDownTimer -= Time.deltaTime;
+
             if (IsServer && !isEnemyDead && (currentBehaviourStateIndex == (int)State.Chase || currentBehaviourStateIndex == (int)State.MarkingPlayer))
             {
                 if (targetPlayer != null && (targetPlayer.isPlayerDead || !targetPlayer.isPlayerControlled))
                 {
-                    Plugin.Logger.LogInfo("Victim died! Chaser is finding a new target...");
-                    PlayerControllerB newVictim = GetClosestPlayer(requireLineOfSight: false);
-
-                    if (newVictim != null)
-                    {
-                        targetPlayer = newVictim;
-                        SyncNewTargetClientRpc((int)newVictim.playerClientId);
-                    }
-                    else
-                    {
-                        SwitchToBehaviourClientRpc((int)State.Observing); 
-                    }
+                    Plugin.Logger.LogInfo("Victim died/DC'd. Chaser is ending the chase early");
+                    TriggerChaseEndClientRpc(); 
                 }
             }
 
             if (!isEnemyDead && currentBehaviourStateIndex == (int)State.Chase)
             {
                 HandleCustomFootsteps();
+
+                bool isMovingNow = agent.velocity.sqrMagnitude > 0.1f;
 
                 if (agent.speed == 0f && !isHalted)
                 {
@@ -541,14 +589,14 @@ namespace Observers {
                         SpawnObserverSpectre();
                     }
                     int activePlayers = Mathf.Min(StartOfRound.Instance.connectedPlayersAmount + 1, 4);
-                    int scrapThreshold = 2 - activePlayers;
+                    int scrapThreshold = 6 - activePlayers;
 
                     PlayerControllerB greedyPlayer = ObserverScrapListener.CheckForGreedyPlayer(scrapThreshold);
 
                     if (greedyPlayer != null)
                     {
                         targetPlayer = greedyPlayer;
-                        Plugin.Logger.LogInfo("greedy boy");
+                        Plugin.Logger.LogInfo("Scrap anger threshold met");
                         SyncTargetClientRpc((int)greedyPlayer.playerClientId);
                         SwitchToBehaviourClientRpc((int)State.MarkingPlayer);
                     }
@@ -673,12 +721,12 @@ namespace Observers {
             {
                 if (elevatorScript.elevatorDoorOpen)
                 {
-                    agent.speed = 8f;
+                    agent.speed = Plugin.BoundConfig.ChaserChaseSpeed.Value;
                     SetDestinationToPosition(elevatorScript.elevatorInsidePoint.position);
                 }
                 else
                 {
-                    agent.speed = 8f;
+                    agent.speed = Plugin.BoundConfig.ChaserChaseSpeed.Value;
                     SetDestinationToPosition(waitingPos);
 
                     if (Vector3.Distance(transform.position, waitingPos) < 1.5f && elevatorScript.elevatorMovingDown != goUp && !elevatorScript.elevatorCalled)
@@ -689,7 +737,7 @@ namespace Observers {
             }
             else
             {
-                agent.speed = 8f;
+                agent.speed = Plugin.BoundConfig.ChaserChaseSpeed.Value;
                 SetDestinationToPosition(waitingPos);
             }
         }
@@ -697,6 +745,7 @@ namespace Observers {
         [ClientRpc]
         public void TriggerChaseEndClientRpc()
         {
+            currentChaseDuration = 0f;
             creatureVoice.Stop();
             if (dieSFX != null)
             {
@@ -709,7 +758,7 @@ namespace Observers {
 
             if (IsServer)
             {
-                SpawnKnifeItemLocally();
+                chaseTimer = 0f;
                 SwitchToBehaviourClientRpc((int)State.Cooldown);
                 if (activeSiren != null)
                 {
@@ -737,7 +786,7 @@ namespace Observers {
 
             Vector3 triggerPos = activeObserver != null ? activeObserver.transform.position : RoundManager.FindMainEntrancePosition(true, isOutside);
 
-            if (Vector3.Distance(targetPlayer.transform.position, triggerPos) < 20f)
+            if (Vector3.Distance(targetPlayer.transform.position, triggerPos) < Plugin.BoundConfig.SpectreTriggerRadius.Value)
             {
                 if (!isPlayingMarkAnimation)
                 {
@@ -811,19 +860,21 @@ namespace Observers {
 
             yield return new WaitForSeconds(15f);
             if (isEnemyDead) yield break;
-
+            if (currentBehaviourStateIndex != (int)State.MarkingPlayer) yield break;
             DespawnObserverSpectre();
             DoAnimationClientRpc("hasBeenSummoned");
             ToggleVisualKnifeClientRpc(true);
             PlayClientFXClientRpc(0);
             PlayChaserSFXClientRpc("reanimate");
             TogglePossessionSwarmClientRpc(true);
-            StartCoroutine(FlickerLightsDuringRise(11.4f));
-            yield return new WaitForSeconds(11.4f);
+            StartCoroutine(FlickerLightsDuringRise(6f));
+            yield return new WaitForSeconds(8f);
             TogglePossessionSwarmClientRpc(false);
             if (isEnemyDead) yield break;
-            PlayClientFXClientRpc(1);
+            yield return new WaitForSeconds(3f);
+            if (isEnemyDead) yield break;
             DoAnimationClientRpc("riseFinished");
+            PlayClientFXClientRpc(1);
             SwitchToBehaviourClientRpc((int)State.Chase);
             isPlayingMarkAnimation = false;
         }
@@ -882,7 +933,7 @@ namespace Observers {
 
             knifeGrabbable.EnableItemMeshes(true);
 
-            Plugin.Logger.LogInfo("Dropped real Kitchen Knife scrap from the hand bone!");
+            Plugin.Logger.LogInfo("Dropped kitchen knife item");
         }
 
         void ManageChaseState()
@@ -890,14 +941,7 @@ namespace Observers {
             if (targetPlayer == null) return;
             bool playerIsOutside = !targetPlayer.isInsideFactory;
             bool chaserIsOutside = this.isOutside;
-            if (playerIsOutside && !chaserIsOutside)
-            {
-                agent.speed = 13f;
-            }
-            else
-            {
-                agent.speed = 8f; 
-            }
+            agent.speed = (slowDownTimer > 0f) ? 3f : Plugin.BoundConfig.ChaserChaseSpeed.Value;
 
             BustOpenDoorsInRadius();
 
@@ -960,7 +1004,7 @@ namespace Observers {
             else
             {
                 moveTowardsDestination = true;
-                SetMovingTowardsTargetPlayer(targetPlayer);
+                SetDestinationToPosition(targetPlayer.transform.position, checkForPath: true);
             }
         }
 
@@ -993,7 +1037,7 @@ namespace Observers {
                         doorSwing.TriggerAnimationNonPlayer(true, true, false);
                         door.OpenDoorAsEnemyServerRpc();
 
-                        Plugin.Logger.LogInfo("Chaser bashed a door open!");
+                        Plugin.Logger.LogInfo("Chaser bashed a door open");
 
                         doorCooldowns[door] = Time.time;
                     }
@@ -1078,35 +1122,38 @@ namespace Observers {
         public override void OnCollideWithPlayer(Collider other)
         {
             base.OnCollideWithPlayer(other);
+        }
 
-            if (isEnemyDead || currentBehaviourStateIndex != (int)State.Chase || attackCooldown > 0f || stunNormalizedTimer > 0f) return;
+        [ServerRpc(RequireOwnership = false)]
+        public void TriggerAttackAnimationServerRpc()
+        {
+            TriggerAttackAnimationClientRpc();
+        }
 
-            PlayerControllerB player = MeetsStandardPlayerCollisionConditions(other, false, true);
-
-            if (player != null)
+        [ClientRpc]
+        public void TriggerAttackAnimationClientRpc()
+        {
+            attackCooldown = 2.0f;
+            slowDownTimer = 1.5f;
+            Animator chaserAnim = GetComponentInChildren<Animator>();
+            if (chaserAnim != null)
             {
-                Plugin.Logger.LogInfo("Chaser stabbed the player!");
-                attackCooldown = 1.5f;
-
-                DoAnimationClientRpc("stabAttack");
-
-                if (knifeStabSounds != null && knifeStabSounds.Length > 0)
+                chaserAnim.SetTrigger("stabAttack");
+            }
+            if (knifeStabSounds != null && knifeStabSounds.Length > 0 && creatureSFX != null)
+            {
+                int randomIndex = UnityEngine.Random.Range(0, knifeStabSounds.Length);
+                if (knifeStabSounds[randomIndex] != null)
                 {
-                    int randomIndex = UnityEngine.Random.Range(0, knifeStabSounds.Length);
-                    if (knifeStabSounds[randomIndex] != null)
-                    {
-                        creatureSFX.PlayOneShot(knifeStabSounds[randomIndex], 1f);
-                    }
+                    creatureSFX.PlayOneShot(knifeStabSounds[randomIndex], 1f);
                 }
-
-                player.DamagePlayer(20, hasDamageSFX: true, callRPC: true, CauseOfDeath.Stabbing);
             }
         }
 
         public override void HitEnemy(int force = 1, PlayerControllerB playerWhoHit = null, bool playHitSFX = false, int hitID = -1)
         {
             base.HitEnemy(force, playerWhoHit, playHitSFX, hitID);
-            if (isEnemyDead) return;
+            if (isEnemyDead || currentBehaviourStateIndex == (int)State.Cooldown) return;
 
             enemyHP -= force;
 

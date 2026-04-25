@@ -38,7 +38,11 @@ namespace Observers.src
             {
                 if (playerEntry.Value.Count >= threshold)
                 {
-                    return StartOfRound.Instance.allPlayerScripts[playerEntry.Key];
+                    PlayerControllerB p = StartOfRound.Instance.allPlayerScripts[playerEntry.Key];
+                    if (p != null && !p.isPlayerDead && p.isPlayerControlled)
+                    {
+                        return p;
+                    }
                 }
             }
             return null;
