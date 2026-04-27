@@ -143,21 +143,6 @@ namespace Observers {
                 Plugin.Logger.LogInfo("Warped Chaser to a random internal AI node");
             }
 
-            ScanNodeProperties scanNode = GetComponentInChildren<ScanNodeProperties>(true);
-            Terminal terminal = FindObjectOfType<Terminal>();
-
-            if (scanNode != null && terminal != null)
-            {
-                foreach (TerminalNode node in terminal.enemyFiles)
-                {
-                    if (node != null && node.creatureName == "Observer")
-                    {
-                        scanNode.creatureScanID = node.creatureFileID;
-                        break;
-                    }
-                }
-            }
-
             currentBehaviourStateIndex = (int)State.Observing;
         }
 
@@ -339,6 +324,25 @@ namespace Observers {
             if (activeObserver == null && Plugin.ObserverPrefab != null)
             {
                 activeObserver = Instantiate(Plugin.ObserverPrefab, spawnPos, spawnRot);
+
+                Terminal terminal = FindObjectOfType<Terminal>();
+                if (terminal != null)
+                {
+                    foreach (TerminalNode node in terminal.enemyFiles)
+                    {
+                        if (node != null && node.creatureName.Contains("Observer"))
+                        {
+                            foreach (ScanNodeProperties sNode in GetComponentsInChildren<ScanNodeProperties>(true))
+                            {
+                                if (sNode.nodeType == 1)
+                                {
+                                    sNode.creatureScanID = node.creatureFileID;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
             }
 
             Instantiate(Plugin.ManifestParticles, spawnPos + (Vector3.up * 1.5f), Quaternion.identity);

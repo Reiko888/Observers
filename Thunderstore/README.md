@@ -1,7 +1,5 @@
 \# THE OBSERVER
 
-This mod adds a unique enemy that becomes more aggressive as more scrap is collected, acting as a guard of the moon's facilities. This enemy incorporates different monster appearances, making every encounter unique! \[V81 COMPATIBLE]
-
 
 
 \## TRAILER (Click the image below to watch on YouTube)

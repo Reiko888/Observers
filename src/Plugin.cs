@@ -92,26 +92,5 @@ namespace Observers {
                 }
             }
         }
-
-        [HarmonyPatch(typeof(Terminal))]
-        public class TerminalKeywordPatch
-        {
-            [HarmonyPatch("Awake")]
-            [HarmonyPostfix]
-            public static void AddKeyword(Terminal __instance)
-            {
-                var ObserverTK = ModAssets.LoadAsset<TerminalKeyword>("ObserverTK");
-
-                if (ObserverTK == null || ObserverTK == null) return;
-
-                var keywordList = __instance.terminalNodes.allKeywords.ToList();
-
-                if (!keywordList.Contains(ObserverTK)) keywordList.Add(ObserverTK);
-
-                __instance.terminalNodes.allKeywords = keywordList.ToArray();
-
-                Plugin.Logger.LogInfo("Successfully injected extra Vecna keywords into the Terminal!");
-            }
-        }
     }
 }
