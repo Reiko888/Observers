@@ -4,7 +4,7 @@
 
 \## TRAILER (Click the image below to watch on YouTube)
 
-<img src="https://raw.githubusercontent.com/Reiko888/test/refs/heads/main/ObserversBanner.png" width="1080">
+[![Watch the Observer Mod Trailer](https://img.youtube.com/vi/e9iog88jfvQ/maxresdefault.jpg)](https://www.youtube.com/watch?v=e9iog88jfvQ)
 
 
 
