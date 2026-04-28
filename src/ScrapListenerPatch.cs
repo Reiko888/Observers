@@ -22,8 +22,10 @@ namespace Observers.src
                 {
                     if (scrapRef.TryGet(out NetworkObject netObj))
                     { ulong id = netObj.NetworkObjectId;
-                        ObserverScrapListener.SpawnedScrapReg.Add(id);
-                        Plugin.Logger.LogInfo($"Added scrap with ID {id} to SpawnedScrapReg");
+                        if (ObserverScrapListener.SpawnedScrapReg.Add(id))
+                        {
+                            Plugin.Logger.LogInfo($"Added scrap with ID {id} to SpawnedScrapReg");
+                        }
                     }
                 }   
             }
@@ -43,6 +45,17 @@ namespace Observers.src
                     ulong playerId = __instance.playerClientId;
                     ObserverScrapListener.RegisterScrapPickup(playerId, scrapId);
                 }
+            }
+        }
+
+        [HarmonyPatch(typeof(GameNetworkManager), "Disconnect")]
+        public class DisconnectPatch
+        {
+            [HarmonyPostfix]
+            public static void ClearScrapData()
+            {
+                ObserverScrapListener.ClearData();
+                Plugin.Logger.LogInfo("Lobby disconnected: Cleared Observer scrap memory and targets.");
             }
         }
     }

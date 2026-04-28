@@ -7,7 +7,7 @@ repository = "https://thunderstore.io"
 [package]
 namespace = "Reiko888"
 name = "Observer"
-versionNumber = "1.0.0"
+versionNumber = "1.1.0"
 description = "This mod adds a unique enemy that becomes more aggressive as more scrap is collected, acting as a guard of the moon's facilities. This enemy incorporates different monster appearances, making every encounter unique! [V81 COMPATIBLE]"
 websiteUrl = "https://github.com/Reiko888/Observers"
 containsNsfwContent = false

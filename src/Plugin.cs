@@ -13,7 +13,7 @@ using UnityEngine;
 using static Observers.src.ScrapListenerPatch;
 
 namespace Observers {
-    [BepInPlugin("Reiko888.Observer", "Observer", "1.0.0")]
+    [BepInPlugin("Reiko888.Observer", "Observer", "1.1.0")]
     [BepInDependency(LethalLib.Plugin.ModGUID)]
     public class Plugin : BaseUnityPlugin
     {
@@ -56,19 +56,19 @@ namespace Observers {
 
             Dictionary<Levels.LevelTypes, int> vanillaWeights = new Dictionary<Levels.LevelTypes, int>
             {
-                { Levels.LevelTypes.TitanLevel, 60 },
-                { Levels.LevelTypes.RendLevel, 15 },
-                { Levels.LevelTypes.DineLevel, 15 },
-                { Levels.LevelTypes.OffenseLevel, 30 },
-                { Levels.LevelTypes.MarchLevel, 45 },
-                { Levels.LevelTypes.ExperimentationLevel, 60 },
-                { Levels.LevelTypes.AssuranceLevel, 40 },
-                { Levels.LevelTypes.VowLevel, 70 },
-                { Levels.LevelTypes.ArtificeLevel, 45 },
-                { Levels.LevelTypes.EmbrionLevel, 50 },
-                { Levels.LevelTypes.AdamanceLevel, 30 },
-                { Levels.LevelTypes.Modded, 45 }
-        };
+                { Levels.LevelTypes.TitanLevel, BoundConfig.SpawnWeightTitan.Value },
+                { Levels.LevelTypes.RendLevel, BoundConfig.SpawnWeightRend.Value },
+                { Levels.LevelTypes.DineLevel, BoundConfig.SpawnWeightDine.Value },
+                { Levels.LevelTypes.OffenseLevel, BoundConfig.SpawnWeightOffense.Value },
+                { Levels.LevelTypes.MarchLevel, BoundConfig.SpawnWeightMarch.Value },
+                { Levels.LevelTypes.ExperimentationLevel, BoundConfig.SpawnWeightExperimentation.Value },
+                { Levels.LevelTypes.AssuranceLevel, BoundConfig.SpawnWeightAssurance.Value },
+                { Levels.LevelTypes.VowLevel, BoundConfig.SpawnWeightVow.Value },
+                { Levels.LevelTypes.ArtificeLevel, BoundConfig.SpawnWeightArtifice.Value },
+                { Levels.LevelTypes.EmbrionLevel, BoundConfig.SpawnWeightEmbrion.Value },
+                { Levels.LevelTypes.AdamanceLevel, BoundConfig.SpawnWeightAdamance.Value },
+                { Levels.LevelTypes.Modded, BoundConfig.SpawnWeightModded.Value }
+            };
             Dictionary<string, int> customWeights = new Dictionary<string, int>();
 
             Enemies.RegisterEnemy(ObserversEnemy, vanillaWeights, customWeights, ObserverTN, ObserverTK);

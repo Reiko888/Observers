@@ -34,18 +34,26 @@ namespace Observers.src
 
         public static PlayerControllerB CheckForGreedyPlayer(int threshold)
         {
+            PlayerControllerB greediestPlayer = null;
+
+            int highestScrapCount = threshold - 1;
+
             foreach (var playerEntry in playerScrapReg)
             {
-                if (playerEntry.Value.Count >= threshold)
+                int playerScrapCount = playerEntry.Value.Count;
+
+                if (playerScrapCount > highestScrapCount)
                 {
                     PlayerControllerB p = StartOfRound.Instance.allPlayerScripts[playerEntry.Key];
                     if (p != null && !p.isPlayerDead && p.isPlayerControlled)
                     {
-                        return p;
+                        greediestPlayer = p;
+                        highestScrapCount = playerScrapCount; 
                     }
                 }
             }
-            return null;
+
+            return greediestPlayer;
         }
         public static void ClearData()
         {
