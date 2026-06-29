@@ -1,12 +1,6 @@
-﻿using BepInEx;
-using HarmonyLib;
-using System;
-using System.Collections.Generic;
-using System.Text;
+﻿using HarmonyLib;
 using Unity.Netcode;
 using GameNetcodeStuff;
-using System.Diagnostics;
-using BepInEx.Logging;
 
 namespace Observers.src
 {

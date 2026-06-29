@@ -1,11 +1,5 @@
-﻿using BepInEx;
-using GameNetcodeStuff;
-using HarmonyLib;
-using LethalLib.Modules;
-using System;
+﻿using GameNetcodeStuff;
 using System.Collections.Generic;
-using System.Text;
-using Unity.Netcode;
 
 namespace Observers.src
 {
