@@ -8,8 +8,8 @@ namespace Observers
         internal ObserverAssets? observerAssets;
 
         public class ObserverAssets(DuskMod mod, string filePath) : AssetBundleLoader<ObserverAssets>(mod, filePath) {
-            [LoadFromBundle("ObserverSpectre.prefab")]
-            public GameObject ObserverSpectre { get; private set; } = null!;
+            [LoadFromBundle("ObserverChaser.prefab")]
+            public GameObject ObserverChaser { get; private set; } = null!;
         }
 
 

@@ -12,12 +12,19 @@ namespace Observers {
 
     class ObserversAI : EnemyAI
     {
+        public static List<ObserversAI> allChasers = new List<ObserversAI>();
+        public ObserversAI master;
+        public bool isMaster;
+        private bool choseMasterObserver;
 #pragma warning disable 0649
         public GameObject ObserverPrefab;
         public GameObject activeObserver;
         public GameObject activeChaserModel;
         public Transform attackArea = null!;
         public int SirenAudioSourceIndex = 0;
+        public int AtmosphereAudioSourceIndex = 1;
+        public AudioClip[] AtmosphereClips;
+        private float atmosphereTimer = 0f;
         public Vector3 SpectreRotationOffset = new Vector3(0, -90, 0);
         public float SirenDelay = 6.5f;
         public ScreenShakeType SirenShakeType = ScreenShakeType.Small;
@@ -49,7 +56,13 @@ namespace Observers {
         private float footstepTimer = 0f;
         public AudioSource movementAudio;
         public GameObject knifeModel;
-        public AudioClip[] knifeStabSounds;
+        [System.Serializable]
+        public struct WeaponSoundSet
+        {
+            public AudioClip[] sounds;
+        }
+        public WeaponSoundSet[] weaponStabSounds;
+        public int activeWeaponIndex = 0;
         private DoorLock[] cachedDoors;
         private float slowScanTimer = 0f;
         private const float SLOW_SCAN_INTERVAL = 2.0f;
@@ -76,6 +89,14 @@ namespace Observers {
         private float currentChaseDuration = 0f;
         private bool isBlasting = false;
         private float cameraShakeTimer = 0f;
+        private float baseSpeed;
+        private float raidVolume;
+        private float observerCooldown;
+        private float detectRange;
+        private bool itemDrop;
+        private float chaseTime;
+        private int chaserDamage;
+        private int scrapAnger;
 
         enum State {
             Observing,
@@ -123,9 +144,19 @@ namespace Observers {
         public override void Start()
         {
             base.Start();
+            updatePositionThreshold = 0.5f;
+            detectRange = ObserverContentHandler.Instance.observerAssets.GetConfig<float>("Observer Detection Range").Value;
+            raidVolume = ObserverContentHandler.Instance.observerAssets.GetConfig<float>("Observer Air Raid volume").Value;
+            observerCooldown = ObserverContentHandler.Instance.observerAssets.GetConfig<float>("Observer Cooldown").Value;
+            baseSpeed = ObserverContentHandler.Instance.observerAssets.GetConfig<float>("Chaser run speed").Value;
+            itemDrop = ObserverContentHandler.Instance.observerAssets.GetConfig<bool>("Chaser item drop").Value;
+            chaseTime = ObserverContentHandler.Instance.observerAssets.GetConfig<float>("Chaser chase time").Value;
+            enemyHP = ObserverContentHandler.Instance.observerAssets.GetConfig<int>("Chaser health").Value;
+            chaserDamage = ObserverContentHandler.Instance.observerAssets.GetConfig<int>("Chaser attack damage").Value;
+            scrapAnger = ObserverContentHandler.Instance.observerAssets.GetConfig<int>("Base scrap anger").Value;
+
             LogIfDebugBuild("Observer Spawned");
             isHalted = true;
-            enemyHP = 2;
 
             shipDoor = FindObjectOfType<HangarShipDoor>();
             chaserAnimator = GetComponentInChildren<Animator>();
@@ -193,6 +224,7 @@ namespace Observers {
                 }
 
                 int randomMeshIndex = enemyRandom.Next(0, meshVariants.Length);
+                activeWeaponIndex = randomMeshIndex;
                 activeChaserModel = meshVariants[randomMeshIndex];
 
                 if (activeChaserModel != null)
@@ -282,8 +314,28 @@ namespace Observers {
             }
             if (StartOfRound.Instance.hangarDoorsClosed && targetPlayer != null && targetPlayer.isInHangarShipRoom && Vector3.Distance(base.transform.position, shipDoor.outsideDoorPoint.position) < 4f)
             {
+                foreach (ObserversAI chaser in allChasers)
+                {
+                    if (chaser != null && chaser != this && chaser.isPryingDoor)
+                    {
+                        return false;
+                    }
+                }
                 BeginPryOpenDoor();
                 return true;
+            }
+            return false;
+        }
+
+        private bool AreOtherChasersAlive()
+        {
+            if (allChasers == null) return false;
+            foreach (var chaser in allChasers)
+            {
+                if (chaser != null && chaser != this && !chaser.isEnemyDead)
+                {
+                    return true;
+                }
             }
             return false;
         }
@@ -291,8 +343,12 @@ namespace Observers {
         public override void OnDestroy()
         {
             base.OnDestroy();
+            if (allChasers.Contains(this)) allChasers.Remove(this);
 
-            if (activeObserver != null) Destroy(activeObserver);
+            if (!AreOtherChasersAlive())
+            {
+                if (activeObserver != null) Destroy(activeObserver);
+            }
             if (creatureVoice != null) creatureVoice.Stop();
 
             Plugin.Logger.LogInfo("Enemy destroyed");
@@ -462,7 +518,15 @@ namespace Observers {
         {
             if (activeObserver == null && ObserverPrefab != null)
             {
-                activeObserver = Instantiate(ObserverPrefab, spawnPos, spawnRot);
+                GameObject newSpectre = Instantiate(ObserverPrefab, spawnPos, spawnRot);
+                foreach (var chaser in allChasers)
+                {
+                    if (chaser != null)
+                    {
+                        chaser.activeObserver = newSpectre;
+                        chaser.hasSpawnedSpectre = true;
+                    }
+                }
 
                 Terminal terminal = FindObjectOfType<Terminal>();
                 if (terminal != null)
@@ -492,8 +556,15 @@ namespace Observers {
         [ClientRpc]
         public void SyncTargetClientRpc(int playerId)
         {
-            targetPlayer = StartOfRound.Instance.allPlayerScripts[playerId];
-            Plugin.Logger.LogInfo($"Target synced to clients: {targetPlayer.playerUsername}");
+            if (playerId >= 0 && playerId < StartOfRound.Instance.allPlayerScripts.Length)
+            {
+                PlayerControllerB target = StartOfRound.Instance.allPlayerScripts[playerId];
+                foreach (var chaser in allChasers)
+                {
+                    if (chaser != null) chaser.targetPlayer = target;
+                }
+                Plugin.Logger.LogInfo($"Target synced to all chasers: {target.playerUsername}");
+            }
         }
 
         [ClientRpc]
@@ -544,6 +615,70 @@ namespace Observers {
             ToggleAndMoveScanNode(false);
         }
 
+
+
+        private void ChooseMasterObserver()
+        {
+            ObserversAI[] array = FindObjectsByType<ObserversAI>(FindObjectsSortMode.None);
+            int lowestIndex = int.MaxValue;
+            int lowestIndexIdx = -1;
+            for (int i = 0; i < array.Length; i++)
+            {
+                if (!array[i].isEnemyDead && array[i].thisEnemyIndex < lowestIndex)
+                {
+                    lowestIndex = array[i].thisEnemyIndex;
+                    lowestIndexIdx = i;
+                }
+            }
+            
+            if (lowestIndexIdx == -1) return;
+            master = array[lowestIndexIdx];
+            
+            if (IsServer)
+            {
+                allChasers = new List<ObserversAI>(array);
+                foreach (ObserversAI chaser in allChasers)
+                {
+                    if (chaser != master) 
+                    {
+                        chaser.isMaster = false;
+                        chaser.master = master;
+                        chaser.activeObserver = master.activeObserver;
+                        chaser.hasSpawnedSpectre = master.hasSpawnedSpectre;
+                    }
+                }
+            }
+
+            if (master == this)
+            {
+                isMaster = true;
+                SyncMasterObserverClientRpc();
+            }
+            else if (IsServer)
+            {
+                master.SyncMasterObserverClientRpc();
+            }
+        }
+
+        [ClientRpc]
+        public void SyncMasterObserverClientRpc()
+        {
+            if (IsServer) return;
+            master = this;
+            isMaster = true;
+            allChasers = new List<ObserversAI>(FindObjectsByType<ObserversAI>(FindObjectsSortMode.None));
+            foreach (ObserversAI chaser in allChasers)
+            {
+                if (chaser != this) 
+                {
+                    chaser.isMaster = false;
+                    chaser.master = this;
+                    chaser.activeObserver = this.activeObserver;
+                    chaser.hasSpawnedSpectre = this.hasSpawnedSpectre;
+                }
+            }
+        }
+
         public override void Update()
         {
             if (isPryingDoor && inSpecialAnimation)
@@ -563,6 +698,19 @@ namespace Observers {
             }
 
             base.Update();
+            
+            if (IsServer && isMaster && !isEnemyDead && currentBehaviourStateIndex == (int)State.Observing)
+            {
+                atmosphereTimer += Time.deltaTime;
+                if (atmosphereTimer >= 10f)
+                {
+                    atmosphereTimer = 0f;
+                    if (UnityEngine.Random.value <= 0.30f)
+                    {
+                        PlayAtmosphereClientRpc();
+                    }
+                }
+            }
             
             if (isBlasting && activeObserver != null)
             {
@@ -618,10 +766,16 @@ namespace Observers {
                 if (IsServer)
                 {
                     currentChaseDuration += Time.deltaTime;
-                    if (currentChaseDuration >= 60)
+                    if (currentChaseDuration >= chaseTime)
                     {
                         Plugin.Logger.LogInfo("Chase time expired");
-                        TriggerChaseEndClientRpc();
+                        if (isMaster)
+                        {
+                            foreach (var chaser in allChasers)
+                            {
+                                if (chaser != null) chaser.TriggerChaseEndClientRpc();
+                            }
+                        }
                         return;
                     }
                 }
@@ -641,7 +795,7 @@ namespace Observers {
                             if (player == localPlayer)
                             {
                                 Plugin.Logger.LogInfo("Target stabbed");
-                                localPlayer.DamagePlayer(20, hasDamageSFX: true, callRPC: true, CauseOfDeath.Stabbing);
+                                localPlayer.DamagePlayer(chaserDamage, hasDamageSFX: true, callRPC: true, CauseOfDeath.Stabbing);
 
                                 attackCooldown = 1.5f;
                                 slowDownTimer = 1.5f;
@@ -656,15 +810,23 @@ namespace Observers {
             else if (currentBehaviourStateIndex == (int)State.Cooldown)
             {
                 chaseTimer += Time.deltaTime;
-                if (chaseTimer > 30f)
+                if (chaseTimer > observerCooldown)
                 {
                     chaseTimer = 0f;
                     targetPlayer = null;
-                    if (IsServer)
+                    if (IsServer && isMaster)
                     {
                         SpectreAnimationClientRpc("cooldownOver");
                         SpectreSetEmissionClientRpc(12f);
-                        SyncStateSafely((int)State.Observing);
+                        ToggleSpotlightClientRpc(true);
+                        foreach (var chaser in allChasers)
+                        {
+                            if (chaser != null)
+                            {
+                                chaser.targetPlayer = null;
+                                chaser.SyncStateSafely((int)State.Observing);
+                            }
+                        }
                     }
                 }
             }
@@ -705,6 +867,19 @@ namespace Observers {
 
         public void LateUpdate()
         {
+            if (IsServer)
+            {
+                if (!choseMasterObserver)
+                {
+                    choseMasterObserver = true;
+                    ChooseMasterObserver();
+                }
+                else if (master == null || master.isEnemyDead)
+                {
+                    ChooseMasterObserver();
+                }
+            }
+
             if (activeObserver != null && !isEnemyDead &&
                 (currentBehaviourStateIndex == (int)State.Observing || currentBehaviourStateIndex == (int)State.MarkingPlayer))
             {
@@ -765,12 +940,14 @@ namespace Observers {
             {
 
                 case (int)State.Observing:
+                    if (!isMaster) break;
+
                     if (!hasSpawnedSpectre)
                     {
                         SpawnObserverSpectre();
                     }
                     int activePlayers = Mathf.Min(StartOfRound.Instance.connectedPlayersAmount + 1, 4);
-                    int scrapThreshold = 1;
+                    int scrapThreshold = scrapAnger;
 
                     PlayerControllerB greedyPlayer = ObserverScrapListener.CheckForGreedyPlayer(scrapThreshold);
 
@@ -784,7 +961,7 @@ namespace Observers {
                     break;
 
                 case (int)State.MarkingPlayer:
-                    ManageMarkingState();
+                    if (isMaster) ManageMarkingState();
                     break;
 
                 case (int)State.Chase:
@@ -913,7 +1090,7 @@ namespace Observers {
             if (elevatorIsHereAndOpen)
             {
                 base.SetDestinationToPosition(elevatorScript.elevatorInsidePoint.position, false);
-                agent.speed = 5f;
+                agent.speed = baseSpeed;
             }
             else
             {
@@ -929,7 +1106,7 @@ namespace Observers {
                 }
                 else
                 {
-                    agent.speed = 5f;
+                    agent.speed = baseSpeed;
                 }
             }
         }
@@ -974,7 +1151,7 @@ namespace Observers {
 
             Vector3 triggerPos = activeObserver != null ? activeObserver.transform.position : RoundManager.FindMainEntrancePosition(true, isOutside);
 
-            if (Vector3.Distance(targetPlayer.transform.position, triggerPos) < 30f)
+            if (Vector3.Distance(targetPlayer.transform.position, triggerPos) < detectRange)
             {
                 if (!isPlayingMarkAnimation)
                 {
@@ -1051,24 +1228,40 @@ namespace Observers {
             if (isEnemyDead) yield break;
             if (currentBehaviourStateIndex != (int)State.MarkingPlayer) yield break;
             
-            DoAnimationClientRpc("hasBeenSummoned");
-            ToggleVisualKnifeClientRpc(true);
-            PlayClientFXClientRpc(0);
-            PlayChaserSFXClientRpc("reanimate");
-            TogglePossessionSwarmClientRpc(true);
-            StartCoroutine(FlickerLightsDuringRise(6f));
+            foreach (var chaser in allChasers)
+            {
+                if (chaser != null && !chaser.isEnemyDead)
+                {
+                    chaser.DoAnimationClientRpc("hasBeenSummoned");
+                    chaser.ToggleVisualKnifeClientRpc(true);
+                    chaser.PlayClientFXClientRpc(0);
+                    chaser.PlayChaserSFXClientRpc("reanimate");
+                    chaser.TogglePossessionSwarmClientRpc(true);
+                    chaser.StartCoroutine(chaser.FlickerLightsDuringRise(6f));
+                }
+            }
             yield return new WaitForSeconds(8f);
-            TogglePossessionSwarmClientRpc(false);
+            foreach (var chaser in allChasers)
+            {
+                if (chaser != null && !chaser.isEnemyDead) chaser.TogglePossessionSwarmClientRpc(false);
+            }
             if (isEnemyDead) yield break;
             yield return new WaitForSeconds(3f);
             if (isEnemyDead) yield break;
-            DoAnimationClientRpc("riseFinished");
-            PlayClientFXClientRpc(1);
-            SetChasePhysicsClientRpc(true);
-            isHalted = false;
-            agent.speed = 5f;
-            SyncStateSafely((int)State.Chase);
-            isPlayingMarkAnimation = false;
+            
+            foreach (var chaser in allChasers)
+            {
+                if (chaser != null && !chaser.isEnemyDead)
+                {
+                    chaser.DoAnimationClientRpc("riseFinished");
+                    chaser.PlayClientFXClientRpc(1);
+                    chaser.SetChasePhysicsClientRpc(true);
+                    chaser.isHalted = false;
+                    chaser.agent.speed = baseSpeed;
+                    chaser.SyncStateSafely((int)State.Chase);
+                    chaser.isPlayingMarkAnimation = false;
+                }
+            }
         }
 
         IEnumerator FinishAirRaidAfter(float delay)
@@ -1077,6 +1270,24 @@ namespace Observers {
             SpectreSetBoolClientRpc("isBlasting", false);
             SpectreAnimationClientRpc("isPoweringDown");
             SpectreSetEmissionClientRpc(0f);
+            ToggleSpotlightClientRpc(false);
+        }
+
+        [ClientRpc]
+        public void ToggleSpotlightClientRpc(bool enable)
+        {
+            if (activeObserver != null)
+            {
+                Transform[] allChildren = activeObserver.GetComponentsInChildren<Transform>(true);
+                foreach (Transform child in allChildren)
+                {
+                    if (child.name == "Spot Light")
+                    {
+                        child.gameObject.SetActive(enable);
+                        break;
+                    }
+                }
+            }
         }
 
         [ClientRpc]
@@ -1120,7 +1331,23 @@ namespace Observers {
         [ClientRpc]
         public void SpectreSetBoolClientRpc(string boolName, bool state)
         {
-            if (boolName == "isBlasting") isBlasting = state;
+            if (boolName == "isBlasting") 
+            {
+                isBlasting = state;
+                if (activeObserver != null)
+                {
+                    Transform shockwave = activeObserver.transform.Find("Shockwave");
+                    if (shockwave != null)
+                    {
+                        ParticleSystem ps = shockwave.GetComponent<ParticleSystem>();
+                        if (ps != null)
+                        {
+                            if (state) ps.Play();
+                            else ps.Stop(true, ParticleSystemStopBehavior.StopEmittingAndClear);
+                        }
+                    }
+                }
+            }
             
             if (activeObserver != null)
             {
@@ -1144,6 +1371,7 @@ namespace Observers {
                     AudioSource src = sources[SirenAudioSourceIndex];
                     if (src != null)
                     {
+                        src.volume = raidVolume;
                         if (play) src.Play();
                         else src.Stop();
                     }
@@ -1156,15 +1384,38 @@ namespace Observers {
         }
 
         [ClientRpc]
+        public void PlayAtmosphereClientRpc()
+        {
+            if (activeObserver != null && AtmosphereClips != null && AtmosphereClips.Length > 0)
+            {
+                AudioSource[] sources = activeObserver.GetComponentsInChildren<AudioSource>();
+                if (AtmosphereAudioSourceIndex >= 0 && AtmosphereAudioSourceIndex < sources.Length)
+                {
+                    AudioSource src = sources[AtmosphereAudioSourceIndex];
+                    if (src != null)
+                    {
+                        int randIdx = UnityEngine.Random.Range(0, AtmosphereClips.Length);
+                        src.PlayOneShot(AtmosphereClips[randIdx]);
+                        Plugin.Logger.LogInfo("Played sound from spectre.");
+                    }
+                }
+                else
+                {
+                    Plugin.Logger.LogWarning($"Atmosphere index {AtmosphereAudioSourceIndex} out of bounds! Found {sources.Length} sources.");
+                }
+            }
+        }
+
+        [ClientRpc]
         public void ToggleVisualKnifeClientRpc(bool enable)
         {
-            if (knifeModels != null && knifeModels.Length > 0)
+            if (knifeModels != null && knifeModels.Length > 0 && activeWeaponIndex >= 0 && activeWeaponIndex < knifeModels.Length)
             {
-                foreach (GameObject knife in knifeModels)
+                for (int i = 0; i < knifeModels.Length; i++)
                 {
-                    if (knife != null)
+                    if (knifeModels[i] != null)
                     {
-                        knife.SetActive(enable);
+                        knifeModels[i].SetActive(enable && i == activeWeaponIndex);
                     }
                 }
             }
@@ -1174,10 +1425,23 @@ namespace Observers {
         {
             if (!IsServer) return;
 
+            string targetItemName = "Knife";
+            if (knifeModels != null && activeWeaponIndex >= 0 && activeWeaponIndex < knifeModels.Length)
+            {
+                GameObject activeKnife = knifeModels[activeWeaponIndex];
+                if (activeKnife != null)
+                {
+                    string lowerName = activeKnife.name.ToLower();
+                    if (lowerName.Contains("shovel")) targetItemName = "Shovel";
+                    else if (lowerName.Contains("stopsign") || lowerName.Contains("stop sign")) targetItemName = "Stop sign";
+                    else if (lowerName.Contains("yield")) targetItemName = "Yield sign";
+                }
+            }
+
             Item knifeToDrop = null;
             foreach (Item item in StartOfRound.Instance.allItemsList.itemsList)
             {
-                if (item.itemName == "Kitchen knife" || item.itemName == "Knife")
+                if (item.itemName == targetItemName || (targetItemName == "Knife" && item.itemName == "Kitchen knife"))
                 {
                     knifeToDrop = item;
                     break;
@@ -1220,7 +1484,7 @@ namespace Observers {
             bool playerIsOutside = !targetPlayer.isInsideFactory;
             bool chaserIsOutside = this.isOutside;
 
-            agent.speed = (slowDownTimer > 0f) ? 3f : 5f;
+            agent.speed = (slowDownTimer > 0f) ? 3f : baseSpeed;
 
             BustOpenDoorsInRadius();
 
@@ -1410,21 +1674,25 @@ namespace Observers {
             {
                 chaserAnim.SetTrigger("stabAttack");
             }
-            if (knifeStabSounds != null && knifeStabSounds.Length > 0 && creatureSFX != null)
+            if (weaponStabSounds != null && activeWeaponIndex >= 0 && activeWeaponIndex < weaponStabSounds.Length)
             {
-                int randomIndex = UnityEngine.Random.Range(0, knifeStabSounds.Length);
-                if (knifeStabSounds[randomIndex] != null)
+                AudioClip[] currentSounds = weaponStabSounds[activeWeaponIndex].sounds;
+                if (currentSounds != null && currentSounds.Length > 0 && creatureSFX != null)
                 {
-                    creatureSFX.PlayOneShot(knifeStabSounds[randomIndex], 1f);
+                    int randomIndex = UnityEngine.Random.Range(0, currentSounds.Length);
+                    if (currentSounds[randomIndex] != null)
+                    {
+                        creatureSFX.PlayOneShot(currentSounds[randomIndex], 1f);
+                    }
                 }
             }
         }
 
         public override void HitEnemy(int force = 1, PlayerControllerB playerWhoHit = null, bool playHitSFX = false, int hitID = -1)
         {
-            base.HitEnemy(force, playerWhoHit, playHitSFX, hitID);
+            if (isEnemyDead || currentBehaviourStateIndex != (int)State.Chase) return;
 
-            if (isEnemyDead || currentBehaviourStateIndex == (int)State.Cooldown) return;
+            base.HitEnemy(force, playerWhoHit, playHitSFX, hitID);
 
             enemyHP -= force;
 
@@ -1470,12 +1738,15 @@ namespace Observers {
             if (IsServer)
             {
                 DoAnimationClientRpc("hasBeenKilled");
-                SpawnKnifeItemLocally();
+                if (itemDrop) SpawnKnifeItemLocally();
                 ToggleVisualKnifeClientRpc(false);
             }
 
-            SpectreSirenClientRpc(false);
-            DespawnObserverSpectre();
+            if (!AreOtherChasersAlive())
+            {
+                SpectreSirenClientRpc(false);
+                DespawnObserverSpectre();
+            }
         }
     }
 }
