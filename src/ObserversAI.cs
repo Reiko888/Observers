@@ -161,11 +161,7 @@ namespace Observers {
             shipDoor = FindObjectOfType<HangarShipDoor>();
             chaserAnimator = GetComponentInChildren<Animator>();
 
-            if (enemyType != null)
-            {
-                enemyType.stunTimeMultiplier = 2;
-            }
-
+        
             if (attackArea != null)
             {
                 Vector3 newScale = attackArea.localScale;
@@ -1132,7 +1128,6 @@ namespace Observers {
             }
 
             SpectreSirenClientRpc(false);
-            ToggleVisualKnifeClientRpc(false);
         }
 
         [ClientRpc]
@@ -1469,11 +1464,39 @@ namespace Observers {
             int scrapValue = (int)(UnityEngine.Random.Range(knifeToDrop.minValue, knifeToDrop.maxValue) * RoundManager.Instance.scrapValueMultiplier);
             knifeGrabbable.SetScrapValue(scrapValue);
 
-            knifeDrop.GetComponent<NetworkObject>().Spawn();
+            NetworkObject netObj = knifeDrop.GetComponent<NetworkObject>();
+            netObj.Spawn();
+            SyncScrapValueClientRpc(netObj, scrapValue);
 
             knifeGrabbable.EnableItemMeshes(true);
 
             Plugin.Logger.LogInfo("Dropped kitchen knife item");
+        }
+
+        [ClientRpc]
+        public void SyncScrapValueClientRpc(NetworkObjectReference netObjRef, int scrapValue)
+        {
+            if (RoundManager.Instance != null)
+            {
+                RoundManager.Instance.StartCoroutine(DelayedScrapValueSync(netObjRef, scrapValue));
+            }
+            else
+            {
+                StartCoroutine(DelayedScrapValueSync(netObjRef, scrapValue));
+            }
+        }
+
+        private System.Collections.IEnumerator DelayedScrapValueSync(NetworkObjectReference netObjRef, int scrapValue)
+        {
+            yield return new UnityEngine.WaitForSeconds(1f);
+            if (netObjRef.TryGet(out NetworkObject netObj))
+            {
+                GrabbableObject grabObj = netObj.GetComponent<GrabbableObject>();
+                if (grabObj != null)
+                {
+                    grabObj.SetScrapValue(scrapValue);
+                }
+            }
         }
 
         void ManageChaseState()
