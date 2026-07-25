@@ -81,7 +81,7 @@ namespace Observers {
         {
             public const string modGUID = "Reiko888.Observer";
             public const string modName = "Observer";
-            public const string modVersion = "2.0.0";
+            public const string modVersion = "2.0.1";
 
             public static Plugin Instance = null!;
             internal static new ManualLogSource Logger = null!;

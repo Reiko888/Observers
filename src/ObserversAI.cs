@@ -105,6 +105,19 @@ namespace Observers {
             Cooldown
         }
 
+        private void HandleOwnershipChange(int newStateIndex)
+        {
+            if (!IsServer) return;
+            if (newStateIndex == (int)State.Chase && targetPlayer != null)
+            {
+                ChangeOwnershipOfEnemy(targetPlayer.actualClientId);
+            }
+            else if (newStateIndex == (int)State.Cooldown || newStateIndex == (int)State.Observing)
+            {
+                ChangeOwnershipOfEnemy(0UL);
+            }
+        }
+
         public void SyncStateSafely(int newStateIndex)
         {
             if (inSpecialAnimation)
@@ -115,6 +128,7 @@ namespace Observers {
 
             if (IsServer)
             {
+                HandleOwnershipChange(newStateIndex);
                 SyncStateSafelyClientRpc(newStateIndex);
             }
             else
@@ -126,12 +140,14 @@ namespace Observers {
         [ServerRpc(RequireOwnership = false)]
         private void SyncStateSafelyServerRpc(int newStateIndex)
         {
+            HandleOwnershipChange(newStateIndex);
             SyncStateSafelyClientRpc(newStateIndex);
         }
 
         [ClientRpc]
         private void SyncStateSafelyClientRpc(int newStateIndex)
         {
+            if (currentBehaviourStateIndex == newStateIndex) return;
             currentBehaviourStateIndex = newStateIndex;
             Plugin.Logger.LogInfo($"Observer State changed to {(State)newStateIndex}");
         }
@@ -144,17 +160,15 @@ namespace Observers {
         public override void Start()
         {
             base.Start();
-            updatePositionThreshold = 0.5f;
             detectRange = ObserverContentHandler.Instance.observerAssets.GetConfig<float>("Observer Detection Range").Value;
             raidVolume = ObserverContentHandler.Instance.observerAssets.GetConfig<float>("Observer Air Raid volume").Value;
             observerCooldown = ObserverContentHandler.Instance.observerAssets.GetConfig<float>("Observer Cooldown").Value;
             baseSpeed = ObserverContentHandler.Instance.observerAssets.GetConfig<float>("Chaser run speed").Value;
             itemDrop = ObserverContentHandler.Instance.observerAssets.GetConfig<bool>("Chaser item drop").Value;
             chaseTime = ObserverContentHandler.Instance.observerAssets.GetConfig<float>("Chaser chase time").Value;
-            enemyHP = ObserverContentHandler.Instance.observerAssets.GetConfig<int>("Chaser health").Value;
+            this.enemyHP = ObserverContentHandler.Instance.observerAssets.GetConfig<int>("Chaser health").Value;
             chaserDamage = ObserverContentHandler.Instance.observerAssets.GetConfig<int>("Chaser attack damage").Value;
             scrapAnger = ObserverContentHandler.Instance.observerAssets.GetConfig<int>("Base scrap anger").Value;
-
             LogIfDebugBuild("Observer Spawned");
             isHalted = true;
 
@@ -234,14 +248,20 @@ namespace Observers {
 
         private void BeginPryOpenDoor()
         {
-            DoAnimationClientRpc("isPryingDoor", true, true);
-            SetPryingDoorClientRpc(true);
+            DoAnimationServerRpc("isPryingDoor", true, true);
+            SetPryingDoorServerRpc(true);
         }
 
         private void FinishPryOpenDoor()
         {
-            DoAnimationClientRpc("isPryingDoor", true, false);
-            SetPryingDoorClientRpc(false);
+            DoAnimationServerRpc("isPryingDoor", true, false);
+            SetPryingDoorServerRpc(false);
+        }
+
+        [ServerRpc(RequireOwnership = false)]
+        public void SetPryingDoorServerRpc(bool state)
+        {
+            SetPryingDoorClientRpc(state);
         }
 
         [ClientRpc]
@@ -388,6 +408,12 @@ namespace Observers {
                     TriggerChaseEndClientRpc();
                 }
             }
+        }
+
+        [ServerRpc(RequireOwnership = false)]
+        public void DoAnimationServerRpc(string animationTrigger, bool isBool = false, bool state = false)
+        {
+            DoAnimationClientRpc(animationTrigger, isBool, state);
         }
 
         [ClientRpc]
@@ -759,46 +785,23 @@ namespace Observers {
 
             if (!isEnemyDead && enemyHP > 0 && currentBehaviourStateIndex == (int)State.Chase && stunNormalizedTimer <= 0f)
             {
-                if (IsServer)
+                if (IsOwner)
                 {
-                    currentChaseDuration += Time.deltaTime;
+                    float timerMultiplier = 1f;
+                    if (targetPlayer != null && this.isOutside != !targetPlayer.isInsideFactory)
+                    {
+                        timerMultiplier = 0.5f;
+                    }
+                    currentChaseDuration += Time.deltaTime * timerMultiplier;
                     if (currentChaseDuration >= chaseTime)
                     {
+                        currentChaseDuration = -9999f;
                         Plugin.Logger.LogInfo("Chase time expired");
                         if (isMaster)
                         {
-                            foreach (var chaser in allChasers)
-                            {
-                                if (chaser != null) chaser.TriggerChaseEndClientRpc();
-                            }
+                            TriggerChaseEndServerRpc();
                         }
                         return;
-                    }
-                }
-
-                if (attackCooldown <= 0f && targetPlayer != null && attackArea != null)
-                {
-                    PlayerControllerB localPlayer = GameNetworkManager.Instance.localPlayerController;
-                    if (localPlayer != null && !localPlayer.isPlayerDead && localPlayer == targetPlayer)
-                    {
-                        int playerLayer = 1 << 3;
-                        Collider[] hitColliders = Physics.OverlapBox(attackArea.position, attackArea.localScale / 2f, attackArea.rotation, playerLayer);
-
-                        foreach (var playerCollider in hitColliders)
-                        {
-                            PlayerControllerB player = MeetsStandardPlayerCollisionConditions(playerCollider);
-
-                            if (player == localPlayer)
-                            {
-                                Plugin.Logger.LogInfo("Target stabbed");
-                                localPlayer.DamagePlayer(chaserDamage, hasDamageSFX: true, callRPC: true, CauseOfDeath.Stabbing);
-
-                                attackCooldown = 1.5f;
-                                slowDownTimer = 1.5f;
-                                TriggerAttackAnimationServerRpc();
-                                break;
-                            }
-                        }
                     }
                 }
             }
@@ -918,7 +921,23 @@ namespace Observers {
                     cachedScanNode.transform.position = activeObserver.transform.position + (Vector3.up * 1.5f);
                 }
             }
+            if (!IsServer && !isEnemyDead)
+            {
+                if (currentBehaviourStateIndex == (int)State.Chase)
+                {
+                    agent.speed = (slowDownTimer > 0f) ? 3f : baseSpeed;
+                }
+                else if (currentBehaviourStateIndex == (int)State.Cooldown)
+                {
+                    agent.speed = 0f;
+                }
+                else
+                {
+                    agent.speed = baseSpeed;
+                }
+            }
         }
+
         
         [ClientRpc]
         public void SyncNewTargetClientRpc(int newVictimId)
@@ -1104,6 +1123,15 @@ namespace Observers {
                 {
                     agent.speed = baseSpeed;
                 }
+            }
+        }
+
+        [ServerRpc(RequireOwnership = false)]
+        public void TriggerChaseEndServerRpc()
+        {
+            foreach (var chaser in allChasers)
+            {
+                if (chaser != null) chaser.TriggerChaseEndClientRpc();
             }
         }
 
@@ -1567,9 +1595,9 @@ namespace Observers {
 
         private void BustOpenDoorsInRadius()
         {
-            if (!IsServer || cachedDoors == null) return;
+            if (!IsOwner || cachedDoors == null) return;
 
-            float bashRangeSq = 4f;
+            float bashRangeSq = 5f;
 
             foreach (DoorLock door in cachedDoors)
             {
@@ -1679,6 +1707,16 @@ namespace Observers {
         public override void OnCollideWithPlayer(Collider other)
         {
             base.OnCollideWithPlayer(other);
+            if (isEnemyDead || currentBehaviourStateIndex != (int)State.Chase || attackCooldown > 0f || stunNormalizedTimer > 0f) return;
+
+            PlayerControllerB player = MeetsStandardPlayerCollisionConditions(other, false, false);
+            if (player != null)
+            {
+                player.DamagePlayer(chaserDamage, hasDamageSFX: true, callRPC: true, CauseOfDeath.Stabbing);
+                attackCooldown = 0.5f;
+                slowDownTimer = 1f;
+                TriggerAttackAnimationServerRpc();
+            }
         }
 
         [ServerRpc(RequireOwnership = false)]
@@ -1690,8 +1728,8 @@ namespace Observers {
         [ClientRpc]
         public void TriggerAttackAnimationClientRpc()
         {
-            attackCooldown = 2.0f;
-            slowDownTimer = 1.5f;
+            attackCooldown = 0.5f;
+            slowDownTimer = 1f;
             Animator chaserAnim = GetComponentInChildren<Animator>();
             if (chaserAnim != null)
             {
@@ -1716,26 +1754,20 @@ namespace Observers {
             if (isEnemyDead || currentBehaviourStateIndex != (int)State.Chase) return;
 
             base.HitEnemy(force, playerWhoHit, playHitSFX, hitID);
+            if (isEnemyDead) return;
 
-            enemyHP -= force;
+            this.enemyHP -= force;
 
-            if (enemyHP <= 0)
+            if (this.enemyHP <= 0)
             {
                 agent.speed = 0f;
                 attackCooldown = 10f;
-                if (creatureVoice != null)
-                {
-                    creatureVoice.Stop();
-                }
+                if (creatureVoice != null) creatureVoice.Stop();
+                KillEnemyOnOwnerClient(false);
             }
             else if (IsServer)
             {
                 DoAnimationClientRpc("TakeDamage");
-            }
-
-            if (enemyHP <= 0 && IsOwner)
-            {
-                KillEnemyOnOwnerClient(true);
             }
         }
 
